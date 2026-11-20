@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Wad da Frog</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Boogaloo&display=swap" rel="stylesheet">
+<style>
+/* VOICE: playful, swampy, toy-like
+   IDEA: a pond diorama, tilted view; kayak in front, lily pads at the far edge
+   PICTURE: the playable swamp itself fills the screen
+   COLOUR and TYPE: deep pond green, lily green, orange kayak, frog red accent; Mitr
+   LAYOUT: one full-height canvas, centered, letterboxed in pond colour */
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0c231d;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+#wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{display:block;touch-action:none;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.45)}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+{
+const W=360,H=640;
+const cv=document.getElementById('c');let ctx=cv.getContext('2d');
+const FONT='Boogaloo, system-ui, sans-serif';
+try{document.fonts.load('40px Boogaloo')}catch(e){}   // canvas text needs the web font fetched up front
+const spriteCache=new Map();let newSprites=0;let bgCache=null,shadowGrad=null,vigGrad=null;
+let PX=1;   // canvas pixels per game unit
+function resize(){
+  const s=Math.min(innerWidth/W,innerHeight/H),d=Math.min(2,window.devicePixelRatio||1);PX=s*d;spriteCache.clear();bgCache=null;
+  cv.style.width=W*s+'px';cv.style.height=H*s+'px';
+  cv.width=Math.round(W*s*d);cv.height=Math.round(H*s*d);
+  ctx.setTransform(s*d,0,0,s*d,0,0);
+}
+addEventListener('resize',resize);resize();
+
+// ---------- tuning ----------
+const TIERS=[{r:10,w:1},{r:14,w:1.3},{r:17,w:1.6},{r:21,w:2},{r:34,w:3}];
+const TEEN=3,GIANT=4,GR=34;
+const SPECIES={normal:{c:'#74c94f',d:'#3f8a2c',name:'Green'},blue:{c:'#4fa8e6',d:'#24639a',name:'Blue!'},red:{c:'#e8553f',d:'#9c2a1e',name:'Red!'}};
+const RED_CHANCE=0.35;
+const T_BOARD=5, T_ROWS=8;    // kayak can't sink before T_BOARD / lily rows start
+const RAMP=15;             // seconds from T_BOARD to full difficulty
+const diff=()=>tut?0:clamp((t-T_BOARD)/RAMP,0,1);
+const lerp=(a,b,k)=>a+(b-a)*k;
+const BLUE_CHANCE=.3;
+const speciesRoll=()=>{const r=Math.random(),red=lerp(.15,.25,diff());return r<red?'red':r<red+BLUE_CHANCE?'blue':'normal'};
+const BLAST_R=110;         // two blue giants' explosion radius
+// layout: lily strip ~10% | swamp ~58% | kayak ~32%
+const TOP=66, SWAMP_BOTTOM=378;
+const KY=61.6, KS=1.35, KB=680;   // kayak art is drawn in its own coordinates, shifted down by KY and scaled by KS about y=KB
+const K=(x,y)=>[180+(x-180)*KS,KB-(KB-(y+KY))*KS];   // kayak coords -> screen
+const BOW_X=180, NEXT_Y=520, LAUNCH_Y=498;   // + KY on screen
+const G=-260;              // buoyancy: things float UP (reverse Suika)
+const SAFE_WEIGHT=4;
+const DRY_WEIGHT=2.5, SINK_WEIGHT=15.5;  // load at which the kayak starts to sit low / goes under (~11 frogs)
+const RED_FLOOD=5.3, FLOOD_DRAIN=.75;   // big but short: ~4 frogs' worth of water, gone in ~7 s      // a red frog's hit lets in water worth ~2 frogs (over ~2 s), draining slowly
+const FULL_LEVEL=80, SINK_TIME=6;        // load alone sinks the kayak to 80%; past capacity it goes under over ~6 s       // kayak weight before water starts rising
+const ATTACK_TIME=1.2;     // red giant's single leap (longer when it jumps from further away)
+const RAID_START=11;            // first red raid: a single slow one to learn the slap
+const CALM=2.5;
+const MERGE_M=5;            // metres per frog-size step for a merge, before the combo multiplier
+const COMBO_STEP=.15, COMBO_CAP=2.5;   // each combo step adds +15% to merge distance, up to x2.5
+const SUMMARY_AT=1.7;       // the ending plays this long before the summary comes up
+const ENTER=.9;            // new rows ease out from under the lily pads over this long, nudging the swamp down
+const STRETCH=.28;         // a thrown frog is stretched along its flight for this long
+const PULL=.08;            // matching frogs pull together this long before merging
+const STAR_EVERY=2000;      // endless: a star for every 2000 m
+const FLY_TIME=1.3;         // a new star pops up mid-screen, then flies into place   // distance for each star; all three clears the level
+const LEAP_MIN=.65;         // red frogs never get faster than this share of their normal leap time
+const BOARD_MIN=.28, BOARD_RAMP=140;   // late game: frogs board up to 1/BOARD_MIN times as often             // breather after a big clear: no boarding, raids or new rows       // red frogs start raiding on their own after this many seconds
+const CHARGE=.4;           // giants crouch this long before jumping
+const PADS=[36,108,180,252,324], PAD_Y=30;
+// waiting frogs line up around the seat, from the lower right, over the front, down the left.
+// Bigger frogs take more of the ring; a full ring is about when the kayak goes under.
+const RING={rx:66,ry:54,a0:-.27,sweep:Math.PI-.54};   // only the part of the ring that is on screen
+const RING_CAP=13.5;   // load (frog weight) that fills the ring
+const SIDE_X=275,SIDE_Y=560;    // frogs hop aboard from the water on the right
+const HL=[[81,648],[84,576],[146,504],[180,478]],HR=[[279,648],[276,576],[214,504],[180,478]];
+const CK={x:180,y:592,rx:42,ry:46};   // cockpit; its rim is where the two waters meet
+
+// ---------- state ----------
+let state='start',overAt=0,nextRow=null,reedWarn=0;
+let items,raft,parts,texts,attackers,leavers,swimmers,blasts=[];
+let maxCombo=0,bestCombo=0,newBestCombo=false,endT0=0,newBest=false,endFx={popped:[]},jumpers=[],escapers=[],mouthT=0,throwSeq=0,throws={},comboPulse=0,rings=[],playTime=0,starsGot=0,flyers=[],winAt=0,calmT=0,flood=0,floodIn=0,raidT=0,raids=0,hitStop=0,ptr=null,scroll,level,dist,t,spawnT,shake,combo,lastMerge,speed,rowT,rowMax,cool,slosh,vl=0,rate=0,pan=0,holdT=0,holdCD=0;
+let best=0;try{best=+localStorage.getItem('frogRaftBest')||0}catch(e){}
+let bestComboSaved=0;try{bestComboSaved=+localStorage.getItem('frogRaftCombo')||0}catch(e){}
+
+function reset(){
+  items=[];raft=[];parts=[];texts=[];attackers=[];leavers=[];swimmers=[];blasts=[];
+  level=0;calmT=0;maxCombo=0;throwSeq=0;throws={};comboPulse=0;rings=[];starsGot=0;flyers=[];flood=0;floodIn=0;raidT=0;raids=0;hitStop=0;slosh=0;scroll=0;rate=0;pan=0;dist=0;t=0;spawnT=1.2;shake=0;combo=0;lastMerge=-9;speed=1;rowT=rowMax=6;cool=0;holdT=0;holdCD=0;
+  startPile(4);settlePile();nextRow=genRow(false);
+  [0,1,0,1,0].forEach((tier,i)=>{const[x,y]=slot(i);raft.push({tier,sp:null,px:x,py:y,d:0})});
+}
+function ringPoint(f){const a=RING.a0-Math.min(f,1.04)*RING.sweep;return K(CK.x+Math.cos(a)*RING.rx,CK.y+Math.sin(a)*RING.ry)}
+function slots(){const out=[K(BOW_X,NEXT_Y)];let s=0;
+  for(let i=1;i<raft.length;i++){const w=TIERS[raft[i].tier].w;out.push(ringPoint((s+w/2)/RING_CAP));s+=w}return out}
+function slot(i){return slots()[i]||K(BOW_X,NEXT_Y)}
+function board(tier,sp,x,y,front){const f={tier,sp,px:x,py:y,d:99};front?raft.unshift(f):raft.push(f)}
+// frogs heading for the kayak dive and swim upstream toward it as faint shadows
+function dive(tier,sp,x,y,full){swimmers.push({tier,sp,full,sx:x,sy:y,x,y,t:-.35,dur:1.3+Math.random()*.5})}
+function rollTier(){const r=Math.random();return r<.31?0:r<.62?1:r<.9?2:3}
+function newFrog(){const tier=rollTier();return[tier,tier===TEEN?speciesRoll():null]}
+// frogs boarding the kayak skew heavier, so there are fewer throws for the same pressure
+function boardFrog(){const r=Math.random(),tier=r<.2?0:r<.48?1:r<.82?2:3;return[tier,tier===TEEN?speciesRoll():null]}
+// two frogs that would react the moment they touch (merge, or egg gets eaten)
+const clash=(a,as,b,bs)=>(a===b&&(a<TEEN||as===bs))||(a===0&&b===TEEN)||(a===TEEN&&b===0);
+function genRow(first){
+  const row=[];let x=0;
+  while(true){let tier,sp,n=0,prev=row[row.length-1];
+    // new rows never put two reacting frogs side by side
+    do{tier=rollTier();sp=tier===TEEN?speciesRoll():null}while(prev&&clash(prev.tier,prev.sp,tier,sp)&&++n<12);
+    const r=TIERS[tier].r;
+    if(x+2*r>W)break;row.push({tier,sp,cx:x+r,r});x+=2*r+1}
+  const off=(W-x)/2;for(const q of row)q.cx+=off;return row}
+// the swamp starts full, packed so that no two touching frogs would react
+function startPile(rows){
+  let y=TOP;
+  for(let k=0;k<rows;k++){let x=0,h=0;const ox=k%2?8:0;
+    while(true){let tier,sp,r,cy,n=0;
+      do{tier=k===rows-1||Math.random()<.75?rollTier():Math.floor(Math.random()*4);sp=tier===TEEN?speciesRoll():null;r=TIERS[tier].r;cy=y+r}
+      while(++n<25&&items.some(o=>Math.hypot(o.x-(ox+x+r),o.y-cy)<o.r+r+16&&clash(o.tier,o.sp,tier,sp)));
+      if(ox+x+2*r>W)break;items.push(mk(tier,sp,ox+x+r,cy,0,0));x+=2*r+1;h=Math.max(h,2*r)}
+    y+=h-4}
+}
+// let the starting pile float into place (no merging), then swap out any touching pair that would react
+function settlePile(){
+  const touch=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y)<a.r+b.r+4;
+  for(let round=0;round<8;round++){
+    for(let s=0;s<160;s++){
+      for(const b of items){b.vy+=G/60;b.vx*=.9;b.vy*=.9;b.x+=b.vx/60;b.y+=b.vy/60;
+        if(b.x<b.r)b.x=b.r;if(b.x>W-b.r)b.x=W-b.r;if(b.y<TOP+b.r){b.y=TOP+b.r;b.vy=0}}
+      for(let i=0;i<items.length;i++)for(let j=i+1;j<items.length;j++){const a=items[i],b=items[j];
+        let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||.01;const m=a.r+b.r;if(d>=m)continue;
+        const o=(m-d)/2;a.x-=dx/d*o;a.y-=dy/d*o;b.x+=dx/d*o;b.y+=dy/d*o}}
+    let bad=0;
+    for(const a of items){
+      if(!items.some(o=>o!==a&&touch(a,o)&&clash(o.tier,o.sp,a.tier,a.sp)))continue;
+      bad++;
+      for(const tier of[0,1,2,3].sort(()=>Math.random()-.5)){
+        const sp=tier===TEEN?speciesRoll():null;
+        if(!items.some(o=>o!==a&&touch(a,o)&&clash(o.tier,o.sp,tier,sp))){a.tier=tier;a.sp=sp;a.r=TIERS[tier].r;break}}}
+    if(!bad)break;
+  }
+  // anything still clashing is simply left out
+  for(const a of items)if(!a.dead&&items.some(o=>o!==a&&!o.dead&&touch(a,o)&&clash(o.tier,o.sp,a.tier,a.sp)))a.dead=true;
+  items=items.filter(b=>!b.dead);
+  for(const b of items){b.vx=b.vy=0;b.born=-5;b.calm=true}   // the starting pile never reacts with itself
+}
+// push the waiting row (previewed under the lily pads) into the swamp
+function addRow(first,quiet){
+  const row=nextRow,h=row.reduce((m,q)=>Math.max(m,q.r),0)*2,smooth=!first&&!quiet;
+  if(!first&&quiet)for(const b of items)b.y+=h;
+  const fresh=[];
+  for(const q of row){const y=TOP+q.r;let n=0;
+    // don't drop a frog right onto one it would react with (the swamp should fill up, not melt)
+    while(n++<12&&(items.some(o=>Math.hypot(o.x-q.cx,o.y-y)<o.r+q.r+12&&clash(o.tier,o.sp,q.tier,q.sp))||
+      fresh.some(o=>Math.abs(o.x-q.cx)<o.r+q.r+3&&clash(o.tier,o.sp,q.tier,q.sp)))){
+      q.tier=rollTier();q.sp=q.tier===TEEN?speciesRoll():null;q.r=Math.min(TIERS[q.tier].r,q.r)}
+    const b=mk(q.tier,q.sp,q.cx,smooth?TOP-q.r*.7:y,0,0);if(smooth){b.enter=ENTER;b.ty=y;b.pop=0}fresh.push(b)}
+  items.push(...fresh);
+  nextRow=genRow(false);
+}
+function mk(tier,sp,x,y,vx,vy){return{tier,sp,x,y,vx,vy,r:TIERS[tier].r,low:0,born:t,pop:.25,dead:false,wob:Math.random()*6,surf:0}}
+function start(fromIntro){reset();sinking=false;jumpers=[];escapers=[];state='play';tut=0;tutMsgT=0;
+  // coming from the title, the starting pile drifts in instead of popping up
+  if(fromIntro)for(const b of items){b.ty=b.y;b.y-=60;b.enter=ENTER;b.pop=0}}
+// ---------- title: an empty swamp, one green frog on the bow; tap and it leaps in, then the game starts ----------
+let intro=null;
+function startScene(){reset();items=[];raft=[];const[x,y]=slot(0);raft.push({tier:TEEN,sp:'normal',px:x,py:y,d:0});state='start'}
+function beginIntro(tutorial){const f=raft.shift();intro={x0:f.px,y0:f.py,x:f.px,y:f.py,t:0,tut:tutorial,splash:false};state='intro'}
+const INTRO_JUMP=.55,INTRO_END=1.25;
+function introUpdate(dt){const it=intro;it.t+=dt;const p=Math.min(1,it.t/INTRO_JUMP),tx=180,ty=430;
+  it.x=it.x0+(tx-it.x0)*p;it.y=it.y0+(ty-it.y0)*p-Math.sin(p*Math.PI)*80;
+  if(p>=1&&!it.splash){it.splash=true;tone(160,.25,'sine',.22,.45);tone(900,.08,'triangle',.08,.6);
+    for(let i=0;i<16;i++){const a=-Math.PI*(.1+.8*Math.random()),v=80+Math.random()*140;parts.push({x:tx,y:ty,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:1.5+Math.random()*2.5,c:'rgba(205,240,255,.85)',life:.6})}}
+  if(it.t>=INTRO_END){intro=null;if(it.tut)startTutorial();else start(true)}}
+function drawIntro(){const it=intro;if(!it)return;const r=TIERS[TEEN].r;
+  if(!it.splash){drawCreature(it.x,it.y,TEEN,'normal',r,t,0,null,1+.15*Math.sin(Math.min(1,it.t/INTRO_JUMP)*Math.PI));return}
+  const k=clamp((it.t-INTRO_JUMP)/(INTRO_END-INTRO_JUMP),0,1);
+  for(let i=0;i<2;i++){const q=clamp(k*1.3-i*.3,0,1);ctx.strokeStyle='rgba(205,240,255,'+(.7*(1-q))+')';ctx.lineWidth=2;
+    ctx.beginPath();ctx.ellipse(it.x,it.y,r*(.6+q*2),r*(.25+q*.7),0,0,Math.PI*2);ctx.stroke()}
+  ctx.globalAlpha=Math.max(0,1-k*2.2);drawCreature(it.x,it.y-6*k,TEEN,'normal',r,t,0,null,1-.4*k);ctx.globalAlpha=1}
+function drawTitle(){
+  const a=state==='intro'?Math.max(0,1-intro.t/.3):1;if(a<=0)return;
+  ctx.save();ctx.globalAlpha=a;ctx.textAlign='center';
+  ctx.font='400 56px '+FONT;ctx.lineWidth=8;ctx.lineJoin='round';ctx.strokeStyle='rgba(6,30,22,.55)';ctx.strokeText('Wad da Frog',W/2,195);ctx.fillStyle='#fff';ctx.fillText('Wad da Frog',W/2,195);
+  ctx.font='400 22px '+FONT;ctx.fillStyle='#fff';ctx.globalAlpha=a*(.6+Math.sin(performance.now()/300)*.4);ctx.fillText('Tap to start',W/2,300);
+  if(tutDone){ctx.globalAlpha=a*.75;ctx.font='400 14px '+FONT;ctx.fillStyle='#fff';ctx.lineWidth=4;ctx.strokeText('↻ How to play',W/2,H-24);ctx.fillText('↻ How to play',W/2,H-24)}
+  ctx.restore()}
+// ---------- tutorial: on the very first play, four guided steps in the same swamp, then the real game ----------
+// 1 throw · 2 merge · 3 the kayak sinks with load · 4 slap the red frog
+let tutEater=null,tutEatPhase='',tutPhase='',tutSunkT=0,tutDip=0,sinkA=0,sinkTick=0,tutPeak=0,tut=0,tutT=0,tutNext=0,tutNeed=0,tutSpawn=0,tutSpawnT=0,tutRed=null,tutMsgT=0,tutFade=0,curLoad=0;
+let tutDone=false;   // every time the game is opened the tutorial plays again (Skip button to jump past it)
+const TUT_TEXT=['','Swipe up to throw a frog','Hit a matching one to merge','Too heavy = sinking! Throw frogs off','','Tap the red frog before it lands!'];
+function startTutorial(){
+  start();tut=0;items=[];raft=[];attackers=[];   // the tutorial starts in an empty swamp
+  tutStep(1);
+}
+function tutStep(n){tut=n;tutT=0;tutNext=0;tutFade=0;
+  if(n>1){tone(1319,.12,'triangle',.12);setTimeout(()=>tone(1760,.18,'triangle',.12),90);burst(W/2,300,'#ffe27a',14)}
+  if(n===1){raft=[];board(0,null,...K(BOW_X,NEXT_Y))}
+  if(n===2){tutNeed=0;raft=[]}
+  if(n===3){tutPhase='fill';tutSpawnT=.3;tutPeak=0}   // fill: watch it sink once · sunk: frogs bail, kayak refloats · try: your turn
+  if(n===4){while(raft.length>1){const f=raft.pop();burst(f.px,f.py,'rgba(200,240,255,.8)',8)}
+    if(raft[0])raft[0].tier=0;tutEater=null;tutEatPhase='feed'}
+  if(n===5){tutRed=null}
+}
+function endTutorial(){
+  tut=0;tutDone=true;
+  // the real game starts its clock now, in the same swamp
+  t=T_BOARD;for(const b of items)b.born=-5;   // the warm-up is done: start where the kayak can already sink
+  spawnT=1.2;rowT=rowMax=6;raidT=0;raids=0;dist=0;starsGot=0;flyers=[];combo=0;maxCombo=0;calmT=0;
+  attackers=attackers.filter(a=>a.swatted);
+  // lighten the kayak for the real start: extra frogs hop off into the water
+  while(raft.length>3){const f=raft.pop();burst(f.px,f.py,'rgba(200,240,255,.8)',8)}
+  tutMsgT=2.4;tone(1047,.12,'triangle',.12);setTimeout(()=>tone(1568,.25,'triangle',.13),110);
+}
+// the frog of the size the merge step needs, closest to the middle of the swamp
+function tutTarget(){let best=null,bd=1e9;
+  for(const b of items){if(b.dead||b.thrown||b.calm||b.tier!==tutNeed||b.enter>0)continue;const d=Math.abs(b.x-180)+Math.abs(b.y-180)*.5;if(d<bd){bd=d;best=b}}
+  return best}
+function tutUpdate(dt){
+  tutT+=dt;tutFade=Math.min(1,tutFade+dt*3);
+  if(tutMsgT>0){tutMsgT-=dt}
+  if(!tut)return;
+  if(tutNext>0){tutNext-=dt;if(tutNext<=0){if(tut<5)tutStep(tut+1);else endTutorial()}return}
+  if(tut===1&&!raft.length&&!items.some(b=>b.thrown))board(0,null,...K(SIDE_X,SIDE_Y));
+  if(tut===2){
+    if(!tutTarget()){const b=mk(tutNeed,null,180,TOP+80,0,0);b.pop=.25;items.push(b);burst(180,TOP+80,'#cfe9ff',8)}
+    if(!raft.length)board(tutNeed,null,...K(SIDE_X,SIDE_Y));
+    else if(raft[0].tier!==tutNeed)raft[0].tier=tutNeed}
+  if(tut===3){
+    if(tutPhase==='sunk'){tutSunkT+=dt;
+      tutDip=tutSunkT<.5?tutSunkT/.5:tutSunkT<1.7?1:Math.max(0,1-(tutSunkT-1.7)/.6);
+      for(const j of jumpers){j.vy+=700*dt;j.x+=j.vx*dt;j.y+=j.vy*dt;j.rot+=j.spin*dt}
+      if(tutSunkT>=2.4){tutPhase='try';tutDip=0;jumpers=[];tutPeak=0;tutT=0;tutFade=0;tutSpawnT=.3;board(0,null,...K(SIDE_X,SIDE_Y))}
+      return}
+    // frogs keep boarding until the kayak is overloaded and starts going under
+    if(curLoad<1.05&&!(tutPhase==='try'&&tutPeak>=1)){tutSpawnT-=dt;if(tutSpawnT<=0){tutSpawnT=tutPhase==='fill'?.2:.14;
+      board(Math.random()<.5?1:2,null,...K(SIDE_X,SIDE_Y));burst(...K(SIDE_X,SIDE_Y),'rgba(200,240,255,.8)',7)}}
+    if(tutPhase==='try'){tutPeak=Math.max(tutPeak,curLoad);
+      // done once the player has thrown it back to safety
+      if(tutPeak>=1&&curLoad<.65)tutNext=.6}
+    if(!raft.length)board(0,null,...K(SIDE_X,SIDE_Y))}
+  if(tut===4){
+    // a grown frog eats eggs; after 3 it's full, dives and swims to the front of the line
+    if(tutEatPhase==='feed'){
+      if(!tutEater||(tutEater.dead&&!(tutEater.fat>=3))){const b=mk(TEEN,'normal',180,190,0,0);b.pop=.25;items.push(b);tutEater=b;burst(180,190,'#9be37a',10)}
+      if(tutEater.dead&&tutEater.fat>=3){tutEatPhase='swim';tutT=0;tutFade=0}
+      if(!raft.length)board(0,null,...K(SIDE_X,SIDE_Y));else if(raft[0].tier!==0&&raft[0].d<4&&!raft[0].tut)raft[0].tier=0}
+    else if(!swimmers.length&&tutT>.5){tutEatPhase='done';tutNext=1.6}
+    return}
+  if(tut===5){
+    if(!tutRed&&tutT>.7){attack(180,TOP+GR*.6,CHARGE+.25);tutRed=attackers[attackers.length-1]}
+    if(tutRed&&tutRed.swatted)tutNext=1.1;
+    if(!raft.length)board(0,null,...K(SIDE_X,SIDE_Y))}
+}
+function tutSank(){if(tutPhase==='sunk')return;tutPhase='sunk';tutSunkT=0;sadSound();drag=null;
+  jumpers=raft.map(it=>({x:it.px,y:it.py,tier:it.tier,sp:it.sp,vx:(it.px-180)*2.2+(Math.random()-.5)*80,vy:-220-Math.random()*160,rot:0,spin:(Math.random()-.5)*10}));
+  raft=[];flood=0;floodIn=0}
+function tutThrew(){if(tut===1&&!tutNext)tutNext=1.1}
+function tutMerged(tier){if(tut!==2||tutNext)return;if(tier>=2)tutNext=1.2;else tutNeed=1}
+// a pointing finger (fingertip at x,y)
+function drawHand(x,y,press,a){
+  ctx.save();ctx.globalAlpha=a;
+  if(press>0){ctx.strokeStyle='rgba(255,255,255,'+(.8*(1-press))+')';ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y,8+press*18,0,Math.PI*2);ctx.stroke()}
+  ctx.translate(x,y);ctx.rotate(-.35);
+  ctx.fillStyle='rgba(0,0,0,.25)';ctx.beginPath();ctx.roundRect?ctx.roundRect(-6,4,20,36,9):ctx.rect(-6,4,20,36);ctx.fill();
+  ctx.fillStyle='#fff';ctx.strokeStyle='rgba(20,40,30,.55)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect?ctx.roundRect(-8,-2,16,30,8):ctx.rect(-8,-2,16,30);ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.roundRect?ctx.roundRect(-10,16,28,26,10):ctx.rect(-10,16,28,26);ctx.fill();ctx.stroke();
+  ctx.restore()}
+// finger swiping from the bow toward (tx,ty)
+function drawSwipe(tx,ty){
+  const c=(tutT%1.5)/1.5,[sx,sy]=[180,575],d=Math.hypot(tx-sx,ty-sy)||1,ux=(tx-sx)/d,uy=(ty-sy)/d,L=120;
+  const m=clamp((c-.15)/.4,0,1),e=m*m*(3-2*m),x=sx+ux*L*e,y=sy+uy*L*e,a=c<.1?c/.1:c>.75?Math.max(0,1-(c-.75)/.15):1;
+  if(e>0){ctx.strokeStyle='rgba(255,255,255,'+(.5*a)+')';ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(x,y);ctx.stroke()}
+  drawHand(x,y,c<.15?c/.15:0,a)}
+function tutLabel(s,y,a){
+  ctx.save();ctx.globalAlpha=a;ctx.font='400 20px '+FONT;const w=ctx.measureText(s).width+30;
+  ctx.fillStyle='rgba(6,20,16,.72)';ctx.beginPath();ctx.roundRect?ctx.roundRect(W/2-w/2,y-22,w,34,17):ctx.rect(W/2-w/2,y-22,w,34);ctx.fill();
+  ctx.fillStyle='#fff';ctx.textAlign='center';ctx.fillText(s,W/2,y+1);ctx.restore()}
+
+// countdown while the kayak is going under: a red bar above the bow that drains to zero, ticking each second
+function drawSinkBar(dt){
+  sinkA+=((sinking&&!(tut===3&&tutPhase==='sunk')?1:0)-sinkA)*Math.min(1,dt*8);if(sinkA<.02)return;
+  const f=level<FULL_LEVEL?1:clamp(1-(level-FULL_LEVEL)/(100-FULL_LEVEL),0,1),secs=Math.ceil(f*SINK_TIME);
+  if(sinking&&secs<sinkTick&&secs>0)tickSound();sinkTick=sinking?secs:99;
+  const x=W/2-62,y=458,w=124,h=12,bl=f<.35?(Math.sin(t*22)>0?1:.55):1;
+  ctx.save();ctx.globalAlpha=sinkA;
+  ctx.fillStyle='rgba(6,20,16,.7)';ctx.beginPath();ctx.roundRect?ctx.roundRect(x-3,y-3,w+6,h+6,9):ctx.rect(x-3,y-3,w+6,h+6);ctx.fill();
+  ctx.globalAlpha=sinkA*bl;ctx.fillStyle='#ff4d3a';ctx.beginPath();ctx.roundRect?ctx.roundRect(x,y,Math.max(h,w*f),h,6):ctx.rect(x,y,w*f,h);ctx.fill();
+  ctx.globalAlpha=sinkA;ctx.font='400 13px '+FONT;ctx.textAlign='center';ctx.lineWidth=3;ctx.strokeStyle='rgba(0,0,0,.5)';ctx.fillStyle='#ffd0c8';
+  ctx.strokeText('SINKING',W/2,y-8);ctx.fillText('SINKING',W/2,y-8);ctx.restore()}
+function drawTut(){
+  if(tutMsgT>0&&!tut){tutLabel('Go! Paddle as far as you can',300,Math.min(1,tutMsgT/.4));return}
+  if(!tut)return;
+  const a=tutNext>0?Math.max(0,tutNext/.5):tutFade;
+  const lab=tut===4?(tutEatPhase==='feed'?'Grown frogs eat eggs. Feed it 3!':'Full! It swims back to the front of the line'):tut!==3?TUT_TEXT[tut]:tutPhase==='fill'?'Too many frogs = the kayak sinks…':tutPhase==='sunk'?'Sunk = Game over!':tutPeak<1?'Here they come again…':'Throw frogs off before it sinks!';
+  tutLabel(lab,tut===5?440:300,Math.min(1,a));
+  // skip, bottom-right
+  ctx.save();ctx.globalAlpha=.9;ctx.fillStyle='rgba(6,20,16,.72)';ctx.strokeStyle='rgba(255,255,255,.55)';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.roundRect?ctx.roundRect(W-84,H-46,72,32,16):ctx.rect(W-84,H-46,72,32);ctx.fill();ctx.stroke();
+  ctx.font='400 15px '+FONT;ctx.textAlign='center';ctx.fillStyle='#fff';ctx.fillText('Skip ›',W-48,H-25);ctx.restore();
+  if(tutNext>0)return;
+  if(tut===1)drawSwipe(180,420);
+  if(tut===2){const g=tutTarget();if(g){const pu=Math.sin(tutT*6)*.5+.5;
+      ctx.strokeStyle='rgba(255,226,122,'+(.5+.4*pu)+')';ctx.lineWidth=3;ctx.beginPath();ctx.arc(g.x,g.y,g.r+6+pu*5,0,Math.PI*2);ctx.stroke();
+      if(!items.some(b=>b.thrown))drawSwipe(g.x,g.y)}}
+  if(tut===3&&tutPhase==='try'&&tutPeak>=1&&!items.some(b=>b.thrown))drawSwipe(180,420);
+  if(tut===4&&tutEatPhase==='feed'&&tutEater&&!tutEater.dead){const g=tutEater,pu=Math.sin(tutT*6)*.5+.5;
+    ctx.strokeStyle='rgba(255,226,122,'+(.5+.4*pu)+')';ctx.lineWidth=3;ctx.beginPath();ctx.arc(g.x,g.y,g.r+6+pu*5,0,Math.PI*2);ctx.stroke();
+    // little "bites" counter over its head
+    for(let i=0;i<3;i++){ctx.fillStyle=i<(g.fat||0)?'#ffe27a':'rgba(255,255,255,.25)';dot(g.x-12+i*12,g.y-g.r-14,4)}
+    if(!items.some(b=>b.thrown))drawSwipe(g.x,g.y)}
+  if(tut===5&&tutRed&&!tutRed.swatted&&tutRed.pre<=0){const c=(tutT%.9)/.9;drawHand(tutRed.x+10,tutRed.y+8-Math.sin(c*Math.PI)*10,c>.5?(c-.5)*2:0,1)}
+}
+
+function saveBest(){newBestCombo=maxCombo>bestComboSaved&&maxCombo>=2;if(newBestCombo){bestComboSaved=maxCombo;try{localStorage.setItem('frogRaftCombo',maxCombo)}catch(e){}}
+  newBest=dist>best;if(newBest){best=Math.floor(dist);try{localStorage.setItem('frogRaftBest',best)}catch(e){}}}
+function gameOver(){state='over';overAt=performance.now();playTime=t;endT0=t;saveBest();sadSound();endFx={popped:[]};
+  // the frogs aboard leap off the sinking kayak
+  jumpers=raft.map(it=>({x:it.px,y:it.py,tier:it.tier,sp:it.sp,vx:(it.px-180)*2.2+(Math.random()-.5)*80,vy:-220-Math.random()*160,rot:0,spin:(Math.random()-.5)*10}));raft=[]}
+function winLevel(){state='win';winAt=t;playTime=t;endT0=t;saveBest();fanfareSound();endFx={popped:[]};
+  // the whole swamp hops away over the lily pads, nearest the top first
+  escapers=items.filter(b=>!b.dead).map(b=>({x:b.x,y:b.y,tier:b.tier,sp:b.sp,tx:PADS.reduce((a,c)=>Math.abs(c-b.x)<Math.abs(a-b.x)?c:a),d:(b.y-TOP)/500*.8+Math.random()*.15,t:0}));
+  items=[];attackers=[]}
+const kOff=()=>0;
+function bez(P,u){const v=1-u;return[v*v*v*P[0][0]+3*v*v*u*P[1][0]+3*v*u*u*P[2][0]+u*u*u*P[3][0],v*v*v*P[0][1]+3*v*v*u*P[1][1]+3*v*u*u*P[2][1]+u*u*u*P[3][1]]}
+function hullX(P,y){let bx=P[0][0],bd=1e9;for(let i=0;i<=40;i++){const[x,yy]=bez(P,i/40),d=Math.abs(yy-y);if(d<bd){bd=d;bx=x}}return bx}
+function hullPath(){ctx.beginPath();ctx.moveTo(81,648);ctx.bezierCurveTo(84,576,146,504,180,478);ctx.bezierCurveTo(214,504,276,576,279,648);ctx.closePath()}
+
+// ---------- helpers ----------
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function dot(x,y,r){ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill()}
+function ell(x,y,rx,ry){ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fill()}
+function say(){}   // no pop-up messages: the game reads from what you see
+function burst(x,y,c,n){for(let i=0;i<n;i++){const a=Math.random()*6.28,v=60+Math.random()*140;
+  parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:2+Math.random()*3,c,life:.6+Math.random()*.3})}}
+// how close the water is to a frog: 0 = safe, 1 = going under
+
+// ---------- sound (starts on the first tap) ----------
+let AC=null;
+function audioOn(){try{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume()}catch(e){AC=null}}
+function tone(f,dur,type,vol,slide){if(!AC)return;try{const o=AC.createOscillator(),g=AC.createGain(),n=AC.currentTime;
+  o.type=type||'sine';o.frequency.setValueAtTime(f,n);if(slide)o.frequency.exponentialRampToValueAtTime(f*slide,n+dur);
+  g.gain.setValueAtTime(0,n);g.gain.linearRampToValueAtTime(vol||.18,n+.008);g.gain.exponentialRampToValueAtTime(.001,n+dur);
+  o.connect(g);g.connect(AC.destination);o.start(n);o.stop(n+dur+.02)}catch(e){}}
+const NOTES=[523,587,659,784,880,988,1175,1319,1568];
+// a soft 'fwip' when a frog is thrown
+function whooshSound(){if(!AC)return;try{const n=AC.currentTime,len=Math.floor(AC.sampleRate*.2),buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+  for(let i=0;i<len;i++){const k=i/len;d[i]=(Math.random()*2-1)*Math.sin(k*Math.PI)}
+  const src=AC.createBufferSource(),bp=AC.createBiquadFilter(),g=AC.createGain();src.buffer=buf;bp.type='bandpass';bp.Q.value=1.4;
+  bp.frequency.setValueAtTime(600,n);bp.frequency.exponentialRampToValueAtTime(2200,n+.18);
+  g.gain.setValueAtTime(.045,n);src.connect(bp);bp.connect(g);g.connect(AC.destination);src.start(n)}catch(e){}}
+// endings: a droopy 'wah-wah' with bubbles, or a short fanfare
+function sadSound(){[[392,.32],[370,.32],[349,.32],[330,.9]].forEach(([f,d],i)=>setTimeout(()=>{tone(f,d,'triangle',.16,i===3?.94:1);tone(f/2,d,'sine',.08)},i*330));
+  for(let i=0;i<6;i++)setTimeout(()=>tone(260+Math.random()*120,.08,'sine',.1,2.4),400+i*170+Math.random()*80)}
+function fanfareSound(){[523,659,784].forEach((f,i)=>setTimeout(()=>tone(f,.16,'triangle',.15),i*120));
+  setTimeout(()=>[523,659,784,1047].forEach(f=>tone(f,.7,'triangle',.09)),380)}
+function tickSound(){tone(2200,.04,'square',.06);setTimeout(()=>tone(1500,.05,'square',.05),70)}
+// a little sparkle when a star is earned
+function starSound(){[1047,1319,1568,2093].forEach((f,i)=>setTimeout(()=>tone(f,.22,'triangle',.13),i*70))}
+// a sharp 'whack': a burst of filtered noise plus a quick low thump
+function slapSound(){if(!AC)return;try{const n=AC.currentTime,len=Math.floor(AC.sampleRate*.12),buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+  for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,3);
+  const src=AC.createBufferSource(),bp=AC.createBiquadFilter(),g=AC.createGain();src.buffer=buf;bp.type='bandpass';bp.frequency.value=1800;bp.Q.value=.8;
+  g.gain.setValueAtTime(.55,n);src.connect(bp);bp.connect(g);g.connect(AC.destination);src.start(n);
+  tone(180,.12,'sine',.3,.45)}catch(e){}}
+// a 'pop' that climbs with the frog's size and with each link of a chain
+function popSound(tier,step){const f=NOTES[Math.min(NOTES.length-1,tier+step)];tone(f*1.6,.09,'sine',.16,.55);tone(f,.16,'triangle',.12)}
+
+// ---------- input ----------
+let drag=null;
+function pt(e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)/r.width*W,y:(e.clientY-r.top)/r.height*H}}
+const aScale=a=>1+.2*Math.min(1,a.t/a.dur);
+function slap(a,dir){
+  slapSound();
+  a.swatted=true;a.vx=dir*760;a.vy=-220;a.spin=dir*22;dist+=5;
+  burst(a.x,a.y,'#ff9a85',16);burst(a.x-dir*GR*.6,a.y,'#fff3c8',8);
+}
+// touching a red frog (tap, or a finger sliding over it) slaps it away from the finger
+function trySwat(p){let hit=false;for(const a of attackers)if(!a.swatted&&Math.hypot(p.x-a.x,p.y-a.y)<GR*aScale(a)+30){slap(a,a.x<p.x?-1:1);hit=true}return hit}
+cv.addEventListener('pointerdown',e=>{
+  const p=pt(e);audioOn();
+  if(state==='start'){beginIntro(!tutDone||p.y>=H-50);return}
+  if(state==='intro')return;
+  if(state==='play'&&tut&&p.x>W-92&&p.y>H-54){endTutorial();return}
+  if(state==='over'||state==='win'){if(t-endT0>SUMMARY_AT+.9)start();return}
+  cv.setPointerCapture(e.pointerId);
+  if(trySwat(p))return;
+  if(p.y>300&&raft.length&&cool<=0&&!(tut===3&&(tutPhase!=='try'||tutPeak<1)))drag={x:p.x,y:p.y,cx:p.x,cy:p.y};
+});
+cv.addEventListener('pointermove',e=>{
+  if(state!=='play')return;const p=pt(e);
+  if((e.buttons||e.pointerType==='touch')&&trySwat(p))drag=null;
+  if(drag){drag.cx=p.x;drag.cy=p.y}
+});
+cv.addEventListener('pointerup',e=>{
+  if(!drag||state!=='play'){drag=null;return}
+  const p=pt(e);drag.cx=p.x;drag.cy=p.y;
+  // the frog stays on the bow and throws the way it is facing (start of the swipe -> release), always at one speed
+  if(aiming()&&raft.length){const[nx,ny]=aimDir(drag.cx-drag.x,drag.cy-drag.y);fling(...K(BOW_X,LAUNCH_Y),nx*THROW_SPEED,ny*THROW_SPEED)}
+  drag=null;
+});
+cv.addEventListener('pointercancel',()=>drag=null);
+// a swipe counts once it is long enough and heads upward
+const aiming=()=>drag&&drag.y-drag.cy>20&&Math.hypot(drag.cx-drag.x,drag.cy-drag.y)>25;
+const THROW_SPEED=980;
+function fling(x,y,vx,vy){
+  cool=.3;tutThrew();
+  const it=raft.shift();
+  const b=mk(it.tier,it.sp||null,x,y,vx,vy);b.thrown=true;b.act=1.2;b.tid=++throwSeq;throws[b.tid]={hit:false,chain:0};b.pop=0;b.stretch=STRETCH;whooshSound();b.spin=clamp(vx/90,-12,12)+(Math.random()-.5)*4;b.rot=0;items.push(b);
+  burst(x,y+6,'rgba(200,240,255,.8)',6);
+}
+function aimDir(dx,dy){const l=Math.hypot(dx,dy)||1;let nx=dx/l,ny=dy/l;
+  if(ny>-.55){ny=-.55;nx=Math.sign(nx||1)*.835}return[nx,ny,l]}
+// swipe direction -> throw from the bow at one fixed speed
+function throwItem(dx,dy){const[nx,ny]=aimDir(dx,dy);fling(...K(BOW_X,LAUNCH_Y),nx*THROW_SPEED,ny*THROW_SPEED)}
+
+// ---------- merging ----------
+function canMerge(a,b){return a.tier===b.tier&&!a.charge&&!b.charge&&!a.pull&&!b.pull&&(a.tier<TEEN||a.sp===b.sp)&&!(a.tier===GIANT&&a.sp==='red')}
+function merge(a,b){
+  if(a.tier===GIANT){ // a matching pair: both crouch, then go together
+    a.charge=b.charge=CHARGE;a.pair=b;b.pair=a;a.lead=true;a.vx=b.vx=a.vy=b.vy=0;
+    popSound(GIANT,landed(a.tid||b.tid));
+    say((a.x+b.x)/2,(a.y+b.y)/2-50,a.sp==='blue'?'คู่ฟ้า! เตรียมระเบิด':'คู่เขียว! ไปด้วยกัน',SPECIES[a.sp].c,17);
+    return}
+  a.dead=b.dead=true;
+  const tier=a.tier+1,x=(a.x+b.x)/2,y=(a.y+b.y)/2;
+  let sp=a.sp;
+  if(tier===TEEN)sp=speciesRoll();
+  const tid=a.tid||b.tid,step=landed(tid);lastMerge=t;tutMerged(tier);
+  dist+=tier*MERGE_M*comboMult();   // the combo multiplies what a merge is worth
+  burst(x,y,tier>=TEEN?SPECIES[sp].c:'#cfe9ff',10+tier*4);
+  // feel: a pop that climbs, a ripple that nudges the neighbours, weight for the big ones
+  popSound(tier,step);
+  // only grown frogs (teen and giant) get the ripple, the nudge and a light shake
+  if(tier>=TEEN){
+    for(const o of items){if(o.dead)continue;const dx=o.x-x,dy=o.y-y,d=Math.hypot(dx,dy)||1;
+      if(d<TIERS[tier].r*3.2){const f=(1-d/(TIERS[tier].r*3.2))*(70+tier*25);o.vx+=dx/d*f;o.vy+=dy/d*f}}
+  }
+  if(tier===GIANT){const g=mk(GIANT,sp,x,y,0,0);g.tid=tid;g.jelly=.45;g.pop=0;
+    if(sp==='red')g.charge=CHARGE;else{g.act=.8;say(x,y-48,'กบยักษ์! หาคู่สีเดียวกัน',SPECIES[sp].c,14)}
+    items.push(g);return}
+  const nb=mk(tier,sp,x,y,(a.vx+b.vx)/2,(a.vy+b.vy)/2);nb.act=.8;nb.tid=tid;nb.jelly=.45;nb.pop=0;items.push(nb);
+  if(tier===TEEN)say(x,y-28,SPECIES[sp].name,SPECIES[sp].c,15);
+}
+function comboMult(){return Math.min(COMBO_CAP,1+COMBO_STEP*Math.max(0,combo-1))}
+function landed(tid){const th=tid&&throws[tid];if(!th)return 0;
+  if(!th.hit){th.hit=true;combo++;comboPulse=.3;maxCombo=Math.max(maxCombo,combo);
+    if(combo>=2)tone(NOTES[Math.min(NOTES.length-1,combo-2)]*2,.12,'sine',.08)}return th.chain++}
+function breakCombo(){if(combo>=2){tone(220,.22,'sine',.16,.5);
+  for(let i=0;i<14;i++){const a=Math.random()*6.28,v=60+Math.random()*120;parts.push({x:30,y:H-52,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:2+Math.random()*2.5,c:combo>=6?'#ff6b9a':combo>=4?'#ffa043':'#ffe27a',life:.5})}}
+  combo=0}
+function eat(f,egg){
+  landed(egg.tid||f.tid);tone(330,.12,'sine',.28,.6);
+  egg.dead=true;f.fat=(f.fat||0)+1;f.r=TIERS[TEEN].r+f.fat*3;f.gulp=.3;f.mo=0;burst(egg.x,egg.y,'rgba(205,232,255,.9)',6);
+  if(f.fat>=3){f.dead=true;dive(TEEN,f.sp,f.x,f.y,true);say(f.x,f.y-f.r-6,'อิ่มแล้ว! ว่ายไปแซงคิว','#ffd34a',15)}
+  else say(f.x,f.y-f.r-6,'งั่ม!','#ffe27a',15);
+}
+// past the first minute, red frogs leap faster and faster (down to half the time)
+const lateMul=()=>Math.max(LEAP_MIN,1-Math.max(0,t-40)/200);
+function attack(x,y,pre){
+  const tx=BOW_X+(Math.random()*80-40)*KS,ty=K(180,585)[1];
+  attackers.push({sx:x,sy:y,x,y,tx,t:0,pre,dur:(ATTACK_TIME+Math.max(0,Math.hypot(tx-x,ty-y)-250)/900)*lateMul(),swatted:false,vx:0,vy:0,rot:0,spin:0});
+}
+// red raiders pop up from under the lily pads, crouch, and leap at the kayak
+function raid(){
+  // one at a time; later ones crouch for less time
+  const first=raids++===0,x=PADS[Math.floor(Math.random()*PADS.length)]+(Math.random()-.5)*20;
+  attack(x,TOP+GR*.6,first?CHARGE+.9:Math.max(.35,(CHARGE+.25)*lateMul()));
+  if(first){attackers[attackers.length-1].dur*=1.5}
+}
+function giant(x,y,sp){
+  if(sp==='normal'){
+    const tx=PADS.reduce((a,b)=>Math.abs(b-x)<Math.abs(a-x)?b:a);
+    leavers.push({x,y,tx,t:0});calmT=Math.max(calmT,CALM);
+    dist+=30;say(x,y-30,'ทางโล่ง! +30m','#c8ff9e',20);
+    for(const b of items){const dx=b.x-x,dy=b.y-y,d=Math.hypot(dx,dy)||1;
+      if(d<110){b.vx+=dx/d*300;b.vy+=dy/d*300}}
+  }else if(sp==='blue'){
+    let n=0;
+    for(const b of items){if(b.dead||b.charge)continue;const dx=b.x-x,dy=b.y-y,d=Math.hypot(dx,dy)||1;
+      if(d<BLAST_R+b.r*.5){b.dead=true;n++;burst(b.x,b.y,b.tier>=TEEN?SPECIES[b.sp].c:'#cfe9ff',5)}
+      else if(d<BLAST_R*2){b.vx+=dx/d*420;b.vy+=dy/d*420}}
+    dist+=10+n*4;blasts.push({x,y,t:0});calmT=Math.max(calmT,CALM);shake=Math.max(shake,.125);   // screen shakes only here and when a red frog hits the kayak
+    burst(x,y,'#9fd8ff',26);burst(x,y,'#ffd27a',14);
+    say(x,y-30,'บูม! +'+(10+n*4)+'m','#9fd8ff',22);
+  }else{
+    attack(x,y,0);
+    say(x,y-30,'ระวัง! แตะ/ปัดทิ้ง','#ff8c7a',17);
+  }
+}
+
+// ---------- update ----------
+function update(dt){
+  t+=dt;cool-=dt;if(tut||tutMsgT>0)tutUpdate(dt);
+  const lv0=level;
+  const off=kOff();
+  // kayak drifts deeper; deeper swamp = more frogs
+  const t0=t-dt;
+  if(t0<T_BOARD&&t>=T_BOARD)say(W/2,300,'เรือเริ่มจมได้แล้ว! กบบนเรือเยอะ = จม','#ffe27a',17,2.6);
+  if(t0<T_ROWS&&t>=T_ROWS)say(W/2,300,'ใบบัวหุบ = กบแถวใหม่ดันลงมา','#c8ff9e',17,2.6);
+  speed=1+6*diff();
+  scroll+=(18+speed*14)*dt;
+  dist+=speed*dt;
+  if(calmT<=0&&!tut)spawnT-=dt;
+  if(spawnT<=0){spawnT=1.4*lerp(2.0,1.2,diff())*Math.max(BOARD_MIN,1-Math.max(0,t-40)/BOARD_RAMP)*Math.max(.5,1-Math.max(0,t-210)/180);   // and a slow squeeze for very long runs
+    board(...boardFrog(),...K(SIDE_X,SIDE_Y));burst(...K(SIDE_X,SIDE_Y),'rgba(200,240,255,.8)',7)}
+  for(const w of swimmers){w.t+=dt;if(w.t<0)continue;
+    const[tx,ty]=w.full?K(BOW_X,NEXT_Y-56):K(SIDE_X-10,SIDE_Y-24);
+    const p=Math.min(1,w.t/w.dur),e=p*p*(3-2*p);
+    w.x=w.sx+(tx-w.sx)*e+Math.sin(w.t*6)*6*(1-p);w.y=w.sy+(ty-w.sy)*e;
+    if(p>=1){w.done=true;board(w.tier,w.sp,w.x,w.y,w.full);burst(w.x,w.y,'rgba(200,240,255,.8)',7);
+      if(w.full)say(BOW_X,NEXT_Y-40+off,'แซงคิว!','#ffd34a',15)}}
+  swimmers=swimmers.filter(w=>!w.done);
+  if(!raft.length&&!tut){board(...newFrog(),...K(SIDE_X,SIDE_Y));burst(...K(SIDE_X,SIDE_Y),'rgba(200,240,255,.8)',5)}
+  // frogs on the kayak hop to their place in line (front one to the bow)
+  const kk=Math.min(1,dt*9);
+  const sl=slots();raft.forEach((it,i)=>{const[tx,ty]=sl[i];it.px+=(tx-it.px)*kk;it.py+=(ty-it.py)*kk;it.d=Math.hypot(tx-it.px,ty-it.py)});
+  // water slopping over the rim once the kayak sits low
+  if(vl>.15){slosh-=dt;if(slosh<=0){slosh=.5-vl*.35+Math.random()*.2;
+    const left=Math.random()<.5,[x,y]=K(...bez(left?HL:HR,.15+Math.random()*.7));
+    for(let i=0;i<5;i++)parts.push({x,y,vx:(left?1:-1)*(30+Math.random()*70),vy:-40-Math.random()*70,r:1.5+Math.random()*2,c:'rgba(200,240,255,.85)',life:.5})}}
+  // grown frogs open their mouths when an egg is near
+  const eggNext=raft[0]&&raft[0].tier===0;
+  mouthT-=dt;const recheck=mouthT<=0;if(recheck)mouthT=.12;
+  for(const b of items)if(b.tier===TEEN){
+    if(recheck){b.near=eggNext;if(!b.near)for(const e of items)if(e.tier===0&&Math.hypot(e.x-b.x,e.y-b.y)<b.r+e.r+70){b.near=true;break}}
+    const near=b.near;
+    if(b.gulp>0)b.gulp-=dt;
+    const tg=b.gulp>0?0:near?1:0;b.mo=(b.mo||0)+(tg-(b.mo||0))*Math.min(1,dt*10)}
+  // lily pads open in 3 stages, then a new row pushes in from the top
+  calmT-=dt;
+  if(t>=T_ROWS&&calmT<=0&&!tut)rowT-=dt;
+  if(rowT<=0){rowT=rowMax=lerp(6,2.5,diff());addRow(false)}
+
+  items=items.filter(b=>!b.dead);
+  const damp=Math.exp(-1.6*dt);
+  for(const b of items){
+    if(b.enter>0){b.enter-=dt;b.y+=(b.ty-b.y)*Math.min(1,dt*4);b.vx=b.vy=0;continue}
+    const dm=b.thrown?Math.exp(-.5*dt):b.charge?Math.exp(-8*dt):damp;
+    b.vy+=G*dt;b.vx*=dm;b.vy*=dm;b.x+=b.vx*dt;b.y+=b.vy*dt;
+    if(b.pop>0)b.pop-=dt;if(b.surf>0)b.surf-=dt;
+    if(b.spin){b.rot+=b.spin*dt;if(!b.thrown){b.spin*=Math.exp(-4*dt);b.rot*=Math.exp(-3*dt);if(Math.abs(b.spin)<.05&&Math.abs(b.rot)<.02){b.spin=0;b.rot=0}}}
+    if(b.act>0&&!b.thrown)b.act-=dt;
+    if(b.tid&&!b.thrown&&b.act<=0){const th=throws[b.tid];if(th&&!th.hit&&!th.done)breakCombo();if(th)th.done=true;b.tid=0}
+    if(b.jelly>0)b.jelly-=dt;
+    if(b.stretch>0)b.stretch-=dt;
+    // water drips off a frog in flight
+    if(b.thrown&&Math.hypot(b.vx,b.vy)>220&&Math.random()<.8)parts.push({x:b.x-b.vx*.012+(Math.random()-.5)*b.r*.6,y:b.y-b.vy*.012+(Math.random()-.5)*b.r*.6,vx:-b.vx*.08,vy:-b.vy*.08+20,r:1+Math.random()*1.8,c:'rgba(205,240,255,.75)',life:.35});
+    if(b.pull){const o=b.pull;
+      if(o.dead||o.pull!==b){b.pull=null}
+      else{const mx=(b.x+o.x)/2,my=(b.y+o.y)/2,k=Math.min(1,dt*28);b.x+=(mx-b.x)*k;b.y+=(my-b.y)*k;b.vx*=.5;b.vy*=.5;
+        b.pullT-=dt;if(b.pullT<=0&&b.lead2){b.lead2=false;b.pull=o.pull=null;merge(b,o)}}}
+    if(b.charge){b.charge-=dt;if(b.charge<=0){b.charge=0;b.dead=true;
+      if(b.sp==='blue'){if(b.lead)giant((b.x+b.pair.x)/2,(b.y+b.pair.y)/2,'blue')}
+      else giant(b.x,b.y,b.sp)}}
+    if(b.thrown&&(Math.hypot(b.vx,b.vy)<90||b.y<TOP+b.r+2))b.thrown=false;
+    if(b.x<b.r){b.x=b.r;b.vx=Math.abs(b.vx)*.4}
+    if(b.x>W-b.r){b.x=W-b.r;b.vx=-Math.abs(b.vx)*.4}
+    if(b.y<TOP+b.r){b.y=TOP+b.r;b.vy=Math.abs(b.vy)*.2}
+    if(b.y>SWAMP_BOTTOM-b.r&&b.vy>0){b.y=SWAMP_BOTTOM-b.r;b.vy*=-.3}
+  }
+  for(let k=0;k<3;k++){
+    for(let i=0;i<items.length;i++){const a=items[i];if(a.dead)continue;
+      for(let j=i+1;j<items.length;j++){const b=items[j];if(b.dead)continue;
+        let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);const m=a.r+b.r;
+        if(d>=m)continue;
+        const calm=a.calm&&b.calm;
+        if(!calm&&canMerge(a,b)){a.pull=b;b.pull=a;a.pullT=b.pullT=PULL;a.lead2=true;continue}
+        if(a.pull===b)continue;
+        if(!calm&&((a.tier===0&&b.tier===TEEN)||(b.tier===0&&a.tier===TEEN))){eat(a.tier===TEEN?a:b,a.tier===0?a:b);if(a.dead)break;continue}
+        if(a.thrown||b.thrown)(a.thrown?a:b).thrown=false;
+        if(d<.01){dx=.01;d=.01}
+        const nx=dx/d,ny=dy/d,o=(m-d)/2;
+        // a frog swimming in from the top pushes the others aside instead of being pushed
+        if(a.enter>0&&!(b.enter>0)){b.x+=nx*o*2;b.y+=ny*o*2}else if(b.enter>0&&!(a.enter>0)){a.x-=nx*o*2;a.y-=ny*o*2}
+        else{a.x-=nx*o;a.y-=ny*o;b.x+=nx*o;b.y+=ny*o}
+        const rv=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+        if(rv<0){const j2=-rv*.6;a.vx-=nx*j2;a.vy-=ny*j2;b.vx+=nx*j2;b.vy+=ny*j2}
+      }}
+    items=items.filter(b=>!b.dead);
+  }
+  // overflow: if the pile reaches the kayak, the frog hops back aboard
+  for(const b of items){
+    if(b.charge)continue;
+    if(!b.thrown&&t-b.born>1&&b.y+b.r*.3>SWAMP_BOTTOM)b.low+=dt;else b.low=0;
+    if(b.low>.25){b.dead=true;board(b.tier,b.sp,b.x,b.y);say(b.x,b.y-20,'หนองล้น!','#ffd0a0',13)}
+  }
+  items=items.filter(b=>!b.dead);
+  // how close the settled pile is to the reeds (drives the reed warning)
+  let pb=0;for(const b of items)if(!b.thrown&&!b.charge)pb=Math.max(pb,b.y+b.r);
+  reedWarn+=(clamp((pb-(SWAMP_BOTTOM-46))/40,0,1)-reedWarn)*Math.min(1,dt*4);
+
+  // red giants: one big leap at the kayak
+  for(const a of attackers){
+    if(a.swatted){a.vy+=700*dt;a.x+=a.vx*dt;a.y+=a.vy*dt;a.rot+=a.spin*dt;continue}
+    if(a.pre>0){a.pre-=dt;continue}
+    if(!(tut===5&&a===tutRed&&a.t/a.dur>=.6))a.t+=dt;const p=Math.min(1,a.t/a.dur),ty=K(180,585)[1];
+    a.x=a.sx+(a.tx-a.sx)*p;a.y=a.sy+(ty-a.sy)*p-Math.sin(p*Math.PI)*120;
+    if(p>=1){a.dead=true;floodIn+=RED_FLOOD;shake=Math.max(shake,.22);burst(a.x,a.y,'#ff7a66',22);say(W/2,520,'โดนโจมตี! น้ำเข้าเรือ','#ff8c7a',19)}
+  }
+  attackers=attackers.filter(a=>!a.dead&&a.y<H+80&&a.x>-80&&a.x<W+80);
+  for(const bl of blasts)bl.t+=dt/.45;blasts=blasts.filter(bl=>bl.t<1);
+  for(const l of leavers)l.t+=dt/.9;
+  leavers=leavers.filter(l=>l.t<1);
+
+  // water rising in the kayak
+  if(t>=RAID_START&&calmT<=0&&!tut){raidT-=dt;if(raidT<=0){raidT=lerp(12,4,diff())*Math.max(.17,1-Math.max(0,t-40)/130)*(.8+Math.random()*.4);raid()}}
+  // stars: pop up in the middle, then fly into the corner counter
+  while(dist>=(starsGot+1)*STAR_EVERY){flyers.push({i:starsGot,t:0});starsGot++;starSound()}
+  // the kayak sits as low as its load: same frogs aboard = same water level
+  const inflow=Math.min(floodIn,RED_FLOOD/.8*dt);floodIn-=inflow;
+  flood=Math.max(0,flood+inflow-FLOOD_DRAIN*dt);
+  const weight=raft.reduce((s,i)=>s+TIERS[i.tier].w,0)+flood;
+  let load=t<T_BOARD&&!tut?0:(weight-DRY_WEIGHT)/(SINK_WEIGHT-DRY_WEIGHT);curLoad=load;
+  const over=load>=1;sinking=over&&state==='play';
+  if(over){ // overloaded: settle to the rim, then slowly go under — time to throw frogs off
+    if(level<FULL_LEVEL)level+=Math.max(8,(FULL_LEVEL-level)*1.6)*dt;
+    else level+=(100-FULL_LEVEL)/SINK_TIME*dt*(tut===3&&tutPhase==='fill'?3:1);   // the tutorial's first sinking is played fast
+  }else{const d=clamp(load,0,1)*FULL_LEVEL-level;
+    level+=Math.sign(d)*Math.min(Math.abs(d),Math.max(8,Math.abs(d)*1.6)*dt)}
+  level=Math.max(0,level);
+  if(level>=100){level=100;if(tut)tutSank();else gameOver()}
+  // the kayak shakes while it is going under
+  pan+=((over?.5+.5*clamp((level-FULL_LEVEL)/(100-FULL_LEVEL),0,1):0)-pan)*Math.min(1,dt*6);
+
+  for(const p of parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.94;p.vy*=.94;p.life-=dt}
+  parts=parts.filter(p=>p.life>0);
+  for(const s of texts){s.y-=26*dt;s.life-=dt}
+  texts=texts.filter(s=>s.life>0);
+  if(shake>0)shake-=dt;
+}
+
+// ---------- drawing ----------
+// Frogs are drawn from pre-rendered sprites (much cheaper than redrawing every shape each frame).
+// Tadpoles get 6 tail-wiggle frames; sc scales the sprite for frogs that grow or shrink on screen.
+// Only grown frogs with an open mouth or cheeks are drawn live.
+const TAD_FRAMES=6;
+function drawCreature(x,y,tier,sp,r,tm,rot,o,sc){
+  sc=sc||1;
+  if(o&&(o.fat||o.mo>.08||o.gulp)){if(sc!==1){ctx.save();ctx.translate(x,y);ctx.scale(sc,sc);drawCreatureRaw(0,0,tier,sp,r,tm,rot,o);ctx.restore()}else drawCreatureRaw(x,y,tier,sp,r,tm,rot,o);return}
+  const tad=tier===1||tier===2,fr=tad?Math.floor((((tm*11)%(2*Math.PI))+2*Math.PI)%(2*Math.PI)/(2*Math.PI)*TAD_FRAMES):0;
+  const key=tier+'|'+sp+'|'+Math.round(r*2)+'|'+fr;let img=spriteCache.get(key);
+  if(!img){
+    if(newSprites>=4){ctx.save();ctx.translate(x,y);ctx.scale(sc,sc);drawCreatureRaw(0,0,tier,sp,r,tm,rot,o);ctx.restore();return}
+    newSprites++;if(spriteCache.size>500)spriteCache.clear();
+    // extents of each kind of creature (left/right, top, bottom) in units of r
+    const ex=tier===0?[1.1,1.1,1.1]:tad?[1.15,1.1,2.05]:tier===GIANT?[1.2,2.05,1.05]:[1.2,1.05,1.05];
+    const w=ex[0]*2*r,h=(ex[1]+ex[2])*r;img=document.createElement('canvas');img.width=Math.ceil(w*PX);img.height=Math.ceil(h*PX);
+    const c=img.getContext('2d'),keep=ctx;c.scale(PX,PX);c.translate(ex[0]*r,ex[1]*r);ctx=c;
+    drawCreatureRaw(0,0,tier,sp,r,tad?(fr+.5)/TAD_FRAMES*2*Math.PI/11:0,0,null);ctx=keep;img.ox=ex[0]*r;img.oy=ex[1]*r;img.w=w;img.h=h;spriteCache.set(key,img)}
+  if(rot){ctx.save();ctx.translate(x,y);ctx.rotate(rot);ctx.drawImage(img,-img.ox*sc,-img.oy*sc,img.w*sc,img.h*sc);ctx.restore()}
+  else ctx.drawImage(img,x-img.ox*sc,y-img.oy*sc,img.w*sc,img.h*sc);
+}
+function drawCreatureRaw(x,y,tier,sp,r,tm,rot,o){
+  ctx.save();ctx.translate(x,y);if(rot)ctx.rotate(rot);
+  if(tier===0){
+    ctx.fillStyle='rgba(205,232,255,.55)';dot(0,0,r);
+    ctx.strokeStyle='rgba(255,255,255,.8)';ctx.lineWidth=1.5;ctx.stroke();
+    ctx.fillStyle='#1d2420';dot(r*.12,-r*.08,r*.34);
+    ctx.fillStyle='rgba(255,255,255,.85)';dot(-r*.42,-r*.42,r*.16);
+  }else if(tier<TEEN){
+    const w=Math.sin(tm*11)*r*.5,legs=tier===2,body=legs?'#7d9160':'#3e424c';
+    if(legs){ctx.fillStyle='#5f7348';ell(-r*.7,r*.55,r*.32,r*.16);ell(r*.7,r*.55,r*.32,r*.16)}
+    ctx.fillStyle=body;
+    ctx.beginPath();ctx.moveTo(-r*.45,r*.5);ctx.quadraticCurveTo(w,r*1.3,w*1.3,r*1.9);
+    ctx.quadraticCurveTo(w*.4,r*1.2,r*.45,r*.5);ctx.closePath();ctx.fill();
+    dot(0,0,r);
+    ctx.fillStyle='rgba(255,255,255,.18)';ell(-r*.3,-r*.35,r*.35,r*.22);
+    ctx.fillStyle='#fff';dot(-r*.38,-r*.2,r*.2);dot(r*.38,-r*.2,r*.2);
+    ctx.fillStyle='#111';dot(-r*.36,-r*.22,r*.1);dot(r*.36,-r*.22,r*.1);
+  }else{
+    const s=SPECIES[sp];
+    ctx.fillStyle='rgba(0,0,0,.18)';ell(0,r*.75,r*.95,r*.25);
+    ctx.fillStyle=s.d;ell(-r*.78,r*.5,r*.36,r*.22);ell(r*.78,r*.5,r*.36,r*.22);
+    ctx.fillStyle=s.c;ell(0,0,r,r*.88);
+    const fat=o&&o.fat||0,mo=o&&o.mo||0,gp=o&&o.gulp?.6:0;
+    if(fat||gp){const cr=r*(.16+.12*(fat+gp));ctx.fillStyle=s.c;dot(-r*.8,r*.16,cr);dot(r*.8,r*.16,cr);
+      ctx.fillStyle='rgba(255,150,150,.4)';dot(-r*.8,r*.16,cr*.55);dot(r*.8,r*.16,cr*.55)}
+    ctx.fillStyle='rgba(255,255,220,.35)';ell(0,r*.3,r*.6,r*.42);
+    if(tier===GIANT){ctx.fillStyle=s.d;dot(-r*.5,-r*.1,r*.12);dot(r*.45,r*.05,r*.1);dot(r*.1,-r*.35,r*.08)}
+    ctx.fillStyle=s.c;dot(-r*.42,-r*.68,r*.32);dot(r*.42,-r*.68,r*.32);
+    ctx.fillStyle='#fff';dot(-r*.42,-r*.7,r*.23);dot(r*.42,-r*.7,r*.23);
+    ctx.fillStyle='#111';dot(-r*.4,-r*.68,r*.11);dot(r*.4,-r*.68,r*.11);
+    ctx.strokeStyle=s.d;ctx.lineWidth=Math.max(2,r*.08);ctx.lineCap='round';
+    if(mo>.08){ctx.fillStyle='#3a1410';ell(0,r*.22,r*.42,r*.34*mo);
+      ctx.fillStyle='#ff8fa0';ell(0,r*.22+r*.16*mo,r*.2,r*.1*mo)}
+    else{ctx.beginPath();ctx.arc(0,r*.02,r*.45,.2*Math.PI,.8*Math.PI);ctx.stroke()}
+    if(tier===GIANT){
+      if(sp==='red'){
+        ctx.fillStyle='#e9dfc6';
+        ctx.beginPath();ctx.moveTo(-r*.55,-r*1.05);ctx.quadraticCurveTo(-r*1.05,-r*1.2,-r*.95,-r*1.7);ctx.quadraticCurveTo(-r*.75,-r*1.3,-r*.3,-r*1.2);ctx.fill();
+        ctx.beginPath();ctx.moveTo(r*.55,-r*1.05);ctx.quadraticCurveTo(r*1.05,-r*1.2,r*.95,-r*1.7);ctx.quadraticCurveTo(r*.75,-r*1.3,r*.3,-r*1.2);ctx.fill();
+        ctx.fillStyle='#7d838e';ctx.beginPath();ctx.ellipse(0,-r*.98,r*.62,r*.5,0,Math.PI,0);ctx.fill();
+        ctx.fillStyle='#5d636d';ctx.fillRect(-r*.66,-r*1.0,r*1.32,r*.14);
+        ctx.fillStyle='rgba(255,255,255,.3)';ell(-r*.2,-r*1.25,r*.18,r*.08);
+        ctx.strokeStyle='#4a0f08';ctx.beginPath();
+        ctx.moveTo(-r*.7,-r*.84);ctx.lineTo(-r*.2,-r*.72);ctx.moveTo(r*.7,-r*.84);ctx.lineTo(r*.2,-r*.72);ctx.stroke();
+      }else if(sp==='blue'){
+        ctx.fillStyle='#2c5d93';ctx.beginPath();ctx.ellipse(0,-r*.98,r*.6,r*.55,0,Math.PI,0);ctx.fill();
+        ctx.fillStyle='#e6eef7';ctx.fillRect(-r*.62,-r*1.02,r*1.24,r*.16);
+        ctx.strokeStyle='rgba(255,255,255,.35)';ctx.lineWidth=1.5;
+        for(let i=-2;i<=2;i++){ctx.beginPath();ctx.moveTo(i*r*.2,-r*1.04);ctx.lineTo(i*r*.17,-r*1.45);ctx.stroke()}
+        ctx.strokeStyle='#5a3a22';ctx.lineWidth=Math.max(1.5,r*.07);ctx.beginPath();ctx.moveTo(0,-r*1.5);ctx.quadraticCurveTo(r*.25,-r*1.75,r*.15,-r*1.95);ctx.stroke();
+        const fl=.7+Math.sin(tm*30)*.3;ctx.fillStyle='rgba(255,200,80,'+fl+')';dot(r*.15,-r*1.97,r*.14*fl+r*.05);ctx.fillStyle='#fff6c8';dot(r*.15,-r*1.97,r*.06);
+      }else{
+        ctx.fillStyle='#d9a94a';ell(0,-r*.98,r*.95,r*.2);
+        ctx.fillStyle='#e8c25a';ctx.beginPath();ctx.ellipse(0,-r*1.02,r*.48,r*.42,0,Math.PI,0);ctx.fill();
+        ctx.fillStyle='#b8432f';ctx.fillRect(-r*.48,-r*1.1,r*.96,r*.1);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawBG(){
+  if(!bgCache){bgCache=document.createElement('canvas');bgCache.width=Math.ceil(W*PX);bgCache.height=Math.ceil(H*PX);
+    const c=bgCache.getContext('2d');c.scale(PX,PX);
+    const g=c.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#123b31');g.addColorStop(.12,'#1a4a3d');g.addColorStop(.66,'#1d5444');g.addColorStop(1,'#2a6a5e');
+    c.fillStyle=g;c.fillRect(0,0,W,H)}
+  ctx.drawImage(bgCache,0,0,W,H);
+  // ripples (far = flatter)
+  ctx.strokeStyle='rgba(255,255,255,.05)';ctx.lineWidth=2;
+  for(let i=0;i<7;i++){const y=TOP+((i*83+scroll)%(H-TOP));const k=y/H;
+    ctx.beginPath();ctx.ellipse(50+(i*61)%260,y,24+30*k,4+6*k,0,0,Math.PI*2);ctx.stroke()}
+  // leaves drifting past along both banks
+  for(let i=0;i<8;i++){const y=((i*97+scroll*1.1)%(H+60))-30,k=.6+.6*y/H,x=i%2?W-14-(i*7)%22:14+(i*11)%22;
+    ctx.save();ctx.translate(x,y);ctx.rotate(i*1.3+Math.sin(t+i)*.2);ctx.scale(k,k);
+    ctx.fillStyle=i%3?'#3d7f4a':'#5b8f3e';ell(0,0,9,5);ctx.strokeStyle='rgba(20,60,30,.6)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(-8,0);ctx.lineTo(8,0);ctx.stroke();ctx.restore()}
+  // far shore band behind the lily pads
+  ctx.fillStyle='#0d2c24';ctx.fillRect(0,0,W,12);
+  ctx.fillStyle='#24543a';
+  for(let x=0;x<W;x+=14){const h=6+((x*7)%9);ctx.fillRect(x,12-h,4,h)}
+  // overflow line
+  // reed line: the pile spills onto the kayak past here
+  const rw=reedWarn,rc=Math.round(63+(214-63)*rw)+','+Math.round(122+(84-122)*rw)+','+Math.round(69+(60-69)*rw);
+  ctx.strokeStyle='rgb('+rc+')';ctx.lineWidth=2+rw;ctx.lineCap='round';
+  for(let x=4;x<W;x+=10){const h=7+((x*13)%9)+rw*4,sw=Math.sin(t*1.5+x)*1.5+Math.sin(t*28+x)*2.2*rw;
+    ctx.beginPath();ctx.moveTo(x,SWAMP_BOTTOM+6);ctx.quadraticCurveTo(x+sw,SWAMP_BOTTOM+6-h*.6,x+sw*2,SWAMP_BOTTOM+6-h);ctx.stroke()}
+  // reeds at the near sides
+  ctx.fillStyle='#2f6b3f';
+  for(let i=0;i<5;i++){const h=40+i*9;ctx.fillRect(6+i*7,H-h,4,h);ctx.fillRect(W-10-i*7,H-h+10,4,h-10)}
+}
+
+function drawPads(){
+  const p=1-rowT/rowMax,fold=clamp((p-.55)/.35,0,1),urgent=rowT<.8;
+  // the waiting row, half under water
+  if(nextRow&&fold>0){
+    ctx.save();ctx.beginPath();ctx.rect(0,0,W,PAD_Y+6);ctx.clip();
+    ctx.globalAlpha=Math.min(1,fold*1.6);
+    for(const q of nextRow)drawCreature(q.cx,PAD_Y+8+(1-fold)*10,q.tier,q.sp,q.r,t+q.cx);
+    ctx.restore();ctx.globalAlpha=1;
+    ctx.strokeStyle='rgba(200,240,255,'+(.35*fold)+')';ctx.lineWidth=1.5;
+    for(const q of nextRow){ctx.beginPath();ctx.ellipse(q.cx,PAD_Y+7,q.r*(1+Math.sin(t*3+q.cx)*.1),q.r*.25,0,0,Math.PI*2);ctx.stroke()}
+  }
+  if(state==='win')nextRow=[];
+  PADS.forEach((x,i)=>{
+    const y=PAD_Y+(urgent?Math.sin(t*30+i)*1.6:Math.sin(t*1.5+i)*1);
+    ctx.save();ctx.translate(x,y);
+    if(state==='win'){const b=clamp((t-endT0-.3-i*.12)/.5,0,1);
+      ctx.fillStyle='#4aa05a';ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,27,Math.PI*.62,Math.PI*2.38);ctx.closePath();ctx.fill();
+      if(b>0){ctx.save();ctx.scale(b,b);for(let k=0;k<6;k++){ctx.save();ctx.rotate(k*Math.PI/3);ctx.fillStyle=k%2?'#ffc4dc':'#ff9cc4';ell(0,-9,6,11);ctx.restore()}
+        ctx.fillStyle='#ffe27a';dot(0,0,5);ctx.restore()}
+      ctx.restore();return}
+    if(fold<1){
+      // open pad, folding in from both sides
+      const sx=1-fold*.82;
+      ctx.fillStyle='rgba(0,0,0,.2)';ell(0,6,27*sx,8);
+      ctx.save();ctx.scale(sx,1);
+      ctx.fillStyle='#4aa05a';ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,27,Math.PI*.62,Math.PI*2.38);ctx.closePath();ctx.fill();
+      ctx.strokeStyle='rgba(30,90,45,.6)';ctx.lineWidth=1.5;
+      for(let a=0;a<5;a++){const an=Math.PI*(.75+a*.32);ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(Math.cos(an)*23,Math.sin(an)*23);ctx.stroke()}
+      ctx.fillStyle='rgba(255,255,255,.12)';ell(-8,-9,9,5);
+      if(fold>0){ctx.fillStyle='rgba(30,90,45,'+(.5*fold)+')';ell(0,0,27,27)}
+      ctx.restore();
+    }else{
+      // folded up into a bud
+      ctx.fillStyle='rgba(0,0,0,.2)';ell(0,6,8,4);
+      ctx.fillStyle='#3f8f4c';ell(0,-2,6,15);ctx.fillStyle='#62b36c';ell(-1.5,-4,2.2,10);
+    }
+    ctx.restore();
+  });
+}
+
+// the kayak blinks red only while it is going under; faster as it gets closer
+let sinking=false;
+function drawWake(off){
+  const tipY=K(180,478)[1],sp=.35+speed*.12;
+  ctx.lineCap='round';
+  for(let i=0;i<6;i++){const ph=(t*sp+i/6)%1,a=.5*(1-ph);
+    for(const dir of[-1,1]){const x=180+dir*(18+ph*170),y=tipY+12+ph*170;
+      ctx.strokeStyle='rgba(215,245,255,'+a+')';ctx.lineWidth=2.5-ph;
+      ctx.beginPath();ctx.moveTo(x-dir*10,y-6);ctx.quadraticCurveTo(x,y-1,x+dir*12,y+5);ctx.stroke()}}
+}
+function drawKayak(off){
+  const bob=Math.sin(t*2.2)*1.5;
+  ctx.save();ctx.translate(180,KB+bob);ctx.scale(KS,KS);ctx.translate(-180,-KB+KY);
+  {const R=1+vl*.8;if(!shadowGrad){shadowGrad=ctx.createRadialGradient(0,0,20/150,0,0,1);shadowGrad.addColorStop(0,'rgba(4,20,18,1)');shadowGrad.addColorStop(1,'rgba(4,20,18,0)')}
+    ctx.save();ctx.globalAlpha=.28+.3*vl;ctx.translate(180,600);ctx.scale(150*R,150*R*.95);ctx.fillStyle=shadowGrad;ctx.fillRect(-1,-1,2,2);ctx.restore()}
+  if(vl>.03){ctx.strokeStyle='rgba(6,28,26,'+Math.min(.5,vl*1.2)+')';ctx.lineWidth=4+vl*14;ctx.lineJoin='round';hullPath();ctx.stroke()}
+  ctx.fillStyle='#e9823f';hullPath();ctx.fill();
+  ctx.fillStyle='rgba(0,0,0,.12)';
+  ctx.beginPath();ctx.moveTo(180,478);ctx.bezierCurveTo(214,504,276,576,279,648);ctx.lineTo(217,648);ctx.bezierCurveTo(215,576,194,507,180,478);ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(180,490);ctx.lineTo(180,538);ctx.stroke();
+  // cockpit
+  ctx.fillStyle='#c4632a';ell(CK.x,CK.y,CK.rx+6,CK.ry+6);
+  ctx.fillStyle='#3b2a22';ell(CK.x,CK.y,CK.rx,CK.ry);
+  // inner water: a circle welling up from the middle of the cockpit
+  const ki=clamp((vl-.02)/.98,0,1);
+  if(ki>0){const rx=CK.rx*ki,ry=CK.ry*ki;
+    ctx.fillStyle='rgba(62,142,166,.86)';ell(CK.x,CK.y,rx,ry);
+    if(vl<.985){ctx.strokeStyle='rgba(205,242,250,.9)';ctx.lineWidth=2.5;ctx.beginPath();ctx.ellipse(CK.x,CK.y,rx,ry,0,0,Math.PI*2);ctx.stroke()}
+    for(let i=0;i<2;i++){const ph=(t*.8+i*.5)%1;
+      ctx.strokeStyle='rgba(205,242,250,'+(.45*(1-ph))+')';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(CK.x,CK.y,rx*ph,ry*ph,0,0,Math.PI*2);ctx.stroke()}
+    ctx.fillStyle='rgba(225,250,255,.8)';
+    for(let i=0;i<5;i++){const ph=(t*1.1+i/5)%1,a=i*2.4+Math.floor(t*1.1+i/5)*1.7,d=.55*Math.abs(Math.sin(a*3.1));
+      dot(CK.x+Math.cos(a)*rx*d,CK.y+Math.sin(a)*ry*d-ph*6,1.2+2*(1-ph)*ki)}}
+  // outer water: a circle closing in from beyond the hull toward the cockpit rim (only on the kayak)
+  const ko=clamp((vl-.03)/.97,0,1);
+  if(ko>0){const sc=2.6-1.6*ko,rx=(CK.rx+6)*sc,ry=(CK.ry+6)*sc;
+    ctx.save();hullPath();ctx.clip();
+    hullPath();ctx.ellipse(CK.x,CK.y,rx,ry,0,0,Math.PI*2);
+    ctx.fillStyle='rgba(62,142,166,.86)';ctx.fill('evenodd');
+    if(vl<.985){ctx.strokeStyle='rgba(205,242,250,.9)';ctx.lineWidth=2.5;ctx.beginPath();ctx.ellipse(CK.x,CK.y,rx,ry,0,0,Math.PI*2);ctx.stroke()}
+    else{ctx.fillStyle='rgba(62,142,166,.86)';ell(CK.x,CK.y,CK.rx+7,CK.ry+7)}
+    ctx.restore()}
+  if(sinking){const k=clamp((level-FULL_LEVEL)/(100-FULL_LEVEL),0,1);
+    if(Math.sin(t*(7+k*22))>-.1){ctx.fillStyle='rgba(235,40,30,'+(.5+.3*k)+')';hullPath();ctx.fill()}}
+  ctx.restore();
+  return bob;
+}
+// when the two waters meet the whole kayak goes under (drawn over the frogs aboard)
+function drawSunk(bob){
+  const k=clamp((vl-.985)/.015,0,1);if(k<=0)return;
+  ctx.save();ctx.translate(180,KB+bob);ctx.scale(KS,KS);ctx.translate(-180,-KB+KY);
+  ctx.fillStyle='rgba(18,58,62,'+(.62*k)+')';
+  ctx.strokeStyle='rgba(18,58,62,'+(.62*k)+')';ctx.lineWidth=24;ctx.lineJoin='round';hullPath();ctx.fill();ctx.stroke();
+  ctx.restore();
+}
+
+function drawQueue(bob,off){
+  for(let i=raft.length-1;i>=1;i--){const it=raft[i];
+    const r=TIERS[it.tier].r*.6*KS,hy=Math.min(16,it.d*.4);
+    drawCreature(it.px,it.py+bob-hy,it.tier,it.sp,r,t+i);
+  }
+  const next=raft[0];if(!next)return;
+  const r=TIERS[next.tier].r;
+  if(drag&&next.d<4){
+    // stays on the bow, turning to face where it will be thrown
+    let ang=0;if(aiming()){const[ax,ay]=aimDir(drag.cx-drag.x,drag.cy-drag.y);ang=Math.atan2(ax,-ay)}
+    drag.ang=(drag.ang||0)+(ang-(drag.ang||0))*.35;
+    drawCreature(next.px,next.py+bob,next.tier,next.sp,r,t,drag.ang,null,1.08);
+    return;
+  }
+  const hop=Math.min(18,next.d*.4),nx=next.px,ny=next.py+bob-hop;
+  if(next.d<4){ctx.strokeStyle='rgba(255,240,170,.6)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(nx,ny,r+6+Math.sin(t*6)*1.5,0,Math.PI*2);ctx.stroke()}
+  drawCreature(nx,ny,next.tier,next.sp,r,t);
+}
+
+function starPath(cx,cy,R){ctx.beginPath();for(let i=0;i<10;i++){const a=-Math.PI/2+i*Math.PI/5,rr=i%2?R*.5:R;
+  i?ctx.lineTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr):ctx.moveTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr)}ctx.closePath()}
+function endUpdate(dt){
+  for(const p of parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.94;p.vy*=.94;p.life-=dt}parts=parts.filter(p=>p.life>0);
+  for(const j of jumpers){j.vy+=700*dt;j.x+=j.vx*dt;j.y+=j.vy*dt;j.rot+=j.spin*dt}
+  for(const e of escapers)e.t+=dt;
+  for(const l of leavers)l.t+=dt/.9;leavers=leavers.filter(l=>l.t<1);
+  const e=t-endT0;
+  if(state==='over'&&e<1.6&&Math.random()<.6){const[bx,by]=K(180+(Math.random()-.5)*120,560+Math.random()*60);
+    parts.push({x:bx,y:by,vx:(Math.random()-.5)*10,vy:-90-Math.random()*60,r:1.5+Math.random()*3,c:'rgba(215,245,255,.7)',life:.9})}
+  // the star count on the summary ticks up, one note per star
+  const sn=endStarCount(e);
+  while((endFx.n||0)<sn){endFx.n=(endFx.n||0)+1;endFx.pop=.25;tone(NOTES[Math.min(NOTES.length-1,endFx.n-1)]*2,.18,'triangle',.13)}
+  endFx.pop=Math.max(0,(endFx.pop||0)-dt);
+  // a new record gets a little party: fanfare and confetti over the summary
+  if(newBest&&!endFx.party&&e>=SUMMARY_AT+1.3){endFx.party=true;fanfareSound();endFx.conf=[];
+    for(let i=0;i<60;i++){const a=-Math.PI/2+(Math.random()-.5)*2.4,v=220+Math.random()*320;
+      endFx.conf.push({x:W/2,y:380,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:2+Math.random()*3,rot:Math.random()*6,c:['#ffd34a','#ff6b9a','#9be37a','#9fd8ff','#ffa043'][i%5],life:1.6+Math.random()*.8})}}
+  if(endFx.conf)for(const c of endFx.conf){c.vy+=420*dt;c.vx*=.985;c.x+=c.vx*dt;c.y+=c.vy*dt;c.rot+=dt*8;c.life-=dt}
+}
+const endStarCount=e=>Math.min(starsGot,Math.floor(Math.max(0,e-SUMMARY_AT-.2)/.28));
+// a soft, rounded star (gold when earned, faint when not)
+function drawStar(cx,cy,R,got){
+  const c=got?'#ffd34a':'rgba(255,255,255,.16)';
+  ctx.save();ctx.lineJoin='round';ctx.lineWidth=R*.42;ctx.strokeStyle=c;ctx.fillStyle=c;
+  starPath(cx,cy,R*.82);ctx.fill();ctx.stroke();
+  if(got){ctx.fillStyle='rgba(255,255,255,.45)';ell(cx-R*.28,cy-R*.3,R*.22,R*.13)}
+  ctx.restore();
+}
+const slotPos=i=>[28,H-84-i*30];
+function drawHUD(){
+  // earned stars sit stacked above the combo; a fresh one flies in from mid-screen
+  // one star counter; a fresh star flies in from mid-screen and bumps it
+  let arrived=0;const[sx,sy]=slotPos(0);
+  for(let i=0;i<starsGot;i++){const f=flyers.find(q=>q.i===i);
+    if(f&&f.t<FLY_TIME){const k=f.t/FLY_TIME;
+      if(k<.45){const p=k/.45,sc=p<.6?p/.6*1.25:1.25-(p-.6)/.4*.25;drawStar(W/2,H*.42,34*sc,true)}
+      else{const p=(k-.45)/.55,e=p*p*(3-2*p);drawStar(W/2+(sx-W/2)*e,H*.42+(sy-H*.42)*e-Math.sin(p*Math.PI)*40,34+(11-34)*e,true)}}
+    else arrived++}
+  const bump=flyers.reduce((m,f)=>f.t>=FLY_TIME&&f.t<FLY_TIME+.25?Math.max(m,1-(f.t-FLY_TIME)/.25):m,0);
+  ctx.save();ctx.translate(sx,sy);ctx.scale(1+bump*.35,1+bump*.35);drawStar(0,0,11,arrived>0);ctx.restore();
+  ctx.textAlign='left';ctx.lineWidth=4;ctx.strokeStyle='rgba(0,0,0,.45)';
+  ctx.font='400 16px '+FONT;ctx.strokeText('×'+arrived,sx+16,sy+6);ctx.fillStyle=arrived?'#ffd34a':'rgba(255,255,255,.6)';ctx.fillText('×'+arrived,sx+16,sy+6);
+  // progress to the next star, under the distance
+  const pr=(dist%STAR_EVERY)/STAR_EVERY;
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(14,H-10,84,4);ctx.fillStyle='#ffd34a';ctx.fillRect(14,H-10,84*pr,4);
+  comboPulse=Math.max(0,comboPulse-1/60);
+  if(combo>=2){const sz=Math.min(1.5,1+(combo-2)*.08)*(1+Math.sin(comboPulse/.3*Math.PI)*.45),s='x'+combo;
+    ctx.save();ctx.translate(14,H-44);ctx.scale(sz,sz);ctx.font='400 24px '+FONT;
+    ctx.strokeText(s,0,0);ctx.fillStyle=combo>=6?'#ff6b9a':combo>=4?'#ffa043':'#ffe27a';ctx.fillText(s,0,0);ctx.restore()}
+  ctx.font='400 18px '+FONT;
+  ctx.strokeText(Math.floor(dist)+' m',14,H-16);
+  ctx.fillStyle='#fff';ctx.fillText(Math.floor(dist)+' m',14,H-16);
+}
+
+
+function overlay(lines,tapText){
+  ctx.fillStyle='rgba(6,20,16,.84)';ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';let y=110;
+  for(const[s,size,c,gap]of lines){ctx.font='400 '+size+'px '+FONT;ctx.fillStyle=c||'#fff';ctx.fillText(s,W/2,y);y+=gap||size+12}
+  ctx.font='400 17px '+FONT;ctx.fillStyle='#ffe27a';
+  ctx.globalAlpha=.6+Math.sin(performance.now()/300)*.4;ctx.fillText(tapText,W/2,H-60);ctx.globalAlpha=1;
+}
+
+function draw(){
+  newSprites=0;
+  ctx.save();
+  if(shake>0)ctx.translate((Math.random()-.5)*10,(Math.random()-.5)*10);
+  drawBG();
+  for(const w of swimmers){const r=TIERS[w.tier].r;
+    if(w.t<0){const k=1+w.t/.35;
+      ctx.strokeStyle='rgba(200,240,255,'+(.6*(1-k))+')';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(w.x,w.y,r*(1+k),r*(.4+.4*k),0,0,Math.PI*2);ctx.stroke();
+      ctx.globalAlpha=1-k;drawCreature(w.x,w.y,w.tier,w.sp,r,t,0,null,1-.3*k);ctx.globalAlpha=1;
+      ctx.fillStyle='rgba(4,22,18,'+((w.full?.42:.2)*k)+')';ell(w.x,w.y,r*.95,r*.75);continue}
+    ctx.fillStyle=w.full?'rgba(4,22,18,.42)':'rgba(4,22,18,.2)';
+    ell(w.x,w.y,r*.95,r*.75);
+    const kick=Math.sin(w.t*12)*r*.15;
+    ell(w.x-r*.55,w.y-r*.85+kick,r*.32,r*.14);ell(w.x+r*.55,w.y-r*.85-kick,r*.32,r*.14)}
+  drawPads();
+  for(const b of items){
+    if(b.enter>0){const k=1-b.enter/ENTER;ctx.globalAlpha=Math.min(1,.25+k*1.4);drawCreature(b.x,b.y,b.tier,b.sp,TIERS[b.tier].r,t+b.wob);ctx.globalAlpha=1;continue}
+    if(b.surf>0){const k=1-b.surf/.4;
+      ctx.strokeStyle='rgba(200,240,255,'+(.7*(1-k))+')';ctx.lineWidth=2;
+      ctx.beginPath();ctx.ellipse(b.x,b.y,b.r*(.6+k*1.2),b.r*(.25+k*.5),0,0,Math.PI*2);ctx.stroke();
+      ctx.globalAlpha=.35+.65*k;drawCreature(b.x,b.y,b.tier,b.sp,TIERS[b.tier].r,t+b.wob,0,null,.4+.6*k);ctx.globalAlpha=1;continue}
+    if(b.charge){const k=1-b.charge/CHARGE,c=b.sp==='red'?'255,110,90':b.sp==='blue'?'130,205,255':'200,255,170';
+      for(let i=0;i<2;i++){const ph=(k*1.6+i*.5)%1;ctx.strokeStyle='rgba('+c+','+(.7*(1-ph))+')';ctx.lineWidth=2.5;
+        ctx.beginPath();ctx.ellipse(b.x,b.y+b.r*.4,b.r*(1+ph*1.3),b.r*(.35+ph*.5),0,0,Math.PI*2);ctx.stroke()}
+      ctx.save();ctx.translate(b.x,b.y+b.r*.15*k);ctx.scale(1+.16*k,1-.2*k);drawCreature(0,0,GIANT,b.sp,b.r,t);ctx.restore();continue}
+    const s=b.pop>0?1+b.pop*1.2:1,br=b.tier===TEEN?TIERS[TEEN].r:b.r,o={fat:b.fat,mo:b.mo,gulp:b.gulp>0};
+    if(b.stretch>0){const e=b.stretch/STRETCH,a=Math.atan2(b.vx,-b.vy);
+      ctx.save();ctx.translate(b.x,b.y);ctx.rotate(a);ctx.scale(1-.22*e,1+.5*e);ctx.rotate(-a);drawCreature(0,0,b.tier,b.sp,br,t+b.wob,b.rot||0,o);ctx.restore();continue}
+    if(b.jelly>0){const k=1-b.jelly/.45,e=(1-k)*(1-k),w=Math.cos(k*Math.PI*3);
+      ctx.save();ctx.translate(b.x,b.y);ctx.scale(1+.4*e*w+.15*e,1-.35*e*w+.15*e);drawCreature(0,0,b.tier,b.sp,br,t+b.wob,b.rot||0,o);ctx.restore()}
+    else drawCreature(b.x,b.y,b.tier,b.sp,br,t+b.wob,b.rot||0,o,s)}
+
+  // once a grown frog has eaten, it shows how many eggs so far (3 = full)
+  for(const b of items)if(b.tier===TEEN&&!b.dead&&!(b.enter>0)&&(b.fat||0)>0&&!(tut===4&&b===tutEater))
+    for(let i=0;i<3;i++){ctx.fillStyle=i<(b.fat||0)?'#ffe27a':'rgba(255,255,255,.3)';dot(b.x-12+i*12,b.y-b.r-12,4)}
+  for(const bl of blasts){const k=bl.t;
+    ctx.fillStyle='rgba(180,230,255,'+(.35*(1-k))+')';dot(bl.x,bl.y,BLAST_R*(.4+.8*k));
+    ctx.strokeStyle='rgba(225,245,255,'+(.9*(1-k))+')';ctx.lineWidth=4*(1-k)+1;ctx.beginPath();ctx.arc(bl.x,bl.y,BLAST_R*(.3+.9*k),0,Math.PI*2);ctx.stroke()}
+  // giants hop away over the lily pads, shrinking into the distance
+  for(const l of leavers){const p=l.t;
+    ctx.globalAlpha=p>.75?(1-p)/.25:1;
+    drawCreature(l.x+(l.tx-l.x)*p,l.y+(-24-l.y)*p-Math.sin(p*Math.PI)*70,GIANT,'normal',GR,t,0,null,1-.65*p)}
+  ctx.globalAlpha=1;
+  for(const e of escapers){const p=clamp((e.t-e.d)/.8,0,1);if(p>=1)continue;const r=TIERS[e.tier].r;
+    if(p<=0){drawCreature(e.x,e.y,e.tier,e.sp,r,t);continue}
+    ctx.globalAlpha=p>.75?(1-p)/.25:1;
+    drawCreature(e.x+(e.tx-e.x)*p,e.y+(-24-e.y)*p-Math.sin(p*Math.PI)*60,e.tier,e.sp,r,t,0,null,1-.6*p);ctx.globalAlpha=1}
+  const off=kOff();
+  drawWake(off);
+  ctx.save();
+  if(state==='over'){const e=clamp((t-endT0)/1.6,0,1);ctx.translate(0,90*e*e);ctx.globalAlpha=1-.55*e}
+  if(tut===3&&tutDip>0){ctx.translate(0,80*tutDip*tutDip);ctx.globalAlpha=1-.5*tutDip}
+  if(state==='win'){const e=clamp((t-endT0)/1.6,0,1);ctx.translate(0,-36*e*(2-e))}
+  if(pan>0&&state==='play'){const a=Math.sin(t*38)*.035*pan;ctx.translate(Math.sin(t*47)*3*pan,0);ctx.translate(...K(180,600));ctx.rotate(a);ctx.translate(-180,-K(180,600)[1])}
+  const bob=drawKayak(off);
+  drawQueue(bob,off);
+  drawSunk(bob);
+  ctx.restore();ctx.globalAlpha=1;
+  for(const j of jumpers)if(j.y<H+40)drawCreature(j.x,j.y,j.tier,j.sp,TIERS[j.tier].r*.6*KS,t,j.rot);
+  for(const a of attackers){const s=aScale(a);
+    if(a.pre>0){const k=clamp(1-a.pre/(CHARGE+.25),0,1);
+      for(let i=0;i<2;i++){const ph=(k*1.6+i*.5)%1;ctx.strokeStyle='rgba(255,110,90,'+(.7*(1-ph))+')';ctx.lineWidth=2.5;
+        ctx.beginPath();ctx.ellipse(a.x,a.y+GR*.4,GR*(1+ph*1.3),GR*(.35+ph*.5),0,0,Math.PI*2);ctx.stroke()}
+      ctx.save();ctx.globalAlpha=Math.min(1,k*3);ctx.translate(a.x,a.y+GR*.15*k);ctx.scale(1+.16*k,1-.2*k);drawCreature(0,0,GIANT,'red',GR,t);ctx.restore();continue}
+    if(!a.swatted){ctx.strokeStyle='rgba(255,90,70,.7)';ctx.lineWidth=3;ctx.beginPath();ctx.arc(a.x,a.y,GR*s+8+Math.sin(t*14)*3,0,Math.PI*2);ctx.stroke()}
+    drawCreature(a.x,a.y,GIANT,'red',GR,t,a.rot,null,s);
+  }
+  for(const p of parts){ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.c;dot(p.x,p.y,p.r)}
+  ctx.globalAlpha=1;
+  ctx.textAlign='center';
+  for(const s of texts){ctx.globalAlpha=Math.min(1,s.life*1.5);ctx.font='400 '+s.size+'px '+FONT;
+    ctx.lineWidth=4;ctx.strokeStyle='rgba(0,0,0,.5)';ctx.strokeText(s.s,s.x,s.y);ctx.fillStyle=s.c;ctx.fillText(s.s,s.x,s.y)}
+  ctx.globalAlpha=1;
+  if(vl>.05){if(!vigGrad){vigGrad=ctx.createRadialGradient(W/2,H*.45,H*.3,W/2,H*.45,H*.78);vigGrad.addColorStop(0,'rgba(8,45,60,0)');vigGrad.addColorStop(1,'rgba(8,45,60,1)')}
+    ctx.globalAlpha=Math.min(.85,vl*.9);ctx.fillStyle=vigGrad;ctx.fillRect(0,0,W,H);ctx.globalAlpha=1}
+  if(state==='play')drawSinkBar(1/60);
+  if(!tut&&state!=='start'&&state!=='intro')drawHUD();
+  drawIntro();
+  drawTut();
+  ctx.restore();
+  if(state==='start'||state==='intro')drawTitle();
+  if(state==='over'||state==='win')drawEnd();
+}
+function drawEnd(){
+  const e=t-endT0,win=state==='win';
+  // the screen dims as the ending plays, then the summary builds up piece by piece
+  const dim=clamp((e-.3)/(SUMMARY_AT-.3),0,1)*.86;ctx.fillStyle='rgba(6,20,16,'+dim+')';ctx.fillRect(0,0,W,H);
+  const k=clamp((e-SUMMARY_AT)/.35,0,1);if(k<=0)return;
+  ctx.textAlign='center';ctx.globalAlpha=k;
+  ctx.font='400 32px '+FONT;ctx.fillStyle=win?'#c8ff9e':'#9fd8e8';ctx.fillText(win?'Level clear!':newBest?'Farthest ever!':'Sunk!',W/2,110-14*(1-k));ctx.globalAlpha=1;
+  endStars(170,e);
+  const cnt=clamp((e-SUMMARY_AT-.4)/.8,0,1),shown=Math.floor(dist*cnt*(2-cnt));
+  const pt=Math.floor(playTime),mm=Math.floor(pt/60),ss=String(pt%60).padStart(2,'0');
+  ctx.globalAlpha=clamp((e-SUMMARY_AT-.3)/.3,0,1);
+  ctx.font='400 22px '+FONT;ctx.fillStyle='#fff';ctx.fillText(shown+' m',W/2,262);
+  ctx.font='400 17px '+FONT;ctx.fillStyle='#cfe9ff';ctx.fillText('Time '+mm+':'+ss,W/2,292);
+  ctx.fillStyle=newBestCombo?'#ffa043':'#cfe9ff';ctx.fillText('Max combo x'+maxCombo+(newBestCombo?'  New!':'  (best x'+bestComboSaved+')'),W/2,320);
+  if(!win){ctx.font='400 15px '+FONT;ctx.fillStyle='rgba(255,255,255,.7)';ctx.fillText('Best '+best+' m',W/2,350)}
+  if(newBest&&cnt>=1){const pu=1+Math.sin(e*7)*.08;ctx.save();ctx.translate(W/2,win?352:380);ctx.scale(pu,pu);
+    ctx.fillStyle='#ff6b9a';ctx.beginPath();ctx.roundRect?ctx.roundRect(-52,-15,104,26,13):ctx.rect(-52,-15,104,26);ctx.fill();
+    ctx.font='400 14px '+FONT;ctx.fillStyle='#fff';ctx.fillText('New best!',0,4);ctx.restore()}
+  ctx.globalAlpha=1;
+  if(endFx.conf)for(const c of endFx.conf){if(c.life<=0)continue;ctx.globalAlpha=Math.min(1,c.life);ctx.fillStyle=c.c;
+    ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.rot);ctx.fillRect(-c.r,-c.r*.5,c.r*2,c.r);ctx.restore()}
+  ctx.globalAlpha=1;
+  if(e>SUMMARY_AT+.9){ctx.font='400 17px '+FONT;ctx.fillStyle='#ffe27a';
+    ctx.globalAlpha=.6+Math.sin(performance.now()/300)*.4;ctx.fillText('Tap to play again',W/2,H-60);ctx.globalAlpha=1}
+}
+// the end screen star count: a big star, the count ticking up, and how far the next one was
+function endStars(y,e){
+  const p=clamp((e-SUMMARY_AT-.1)/.3,0,1);if(p<=0)return;
+  const n=endStarCount(e),sc=1+(endFx.pop||0)*1.2;
+  ctx.save();ctx.globalAlpha=p;ctx.translate(W/2-34,y);ctx.scale(sc,sc);drawStar(0,0,26,n>0);ctx.restore();
+  ctx.globalAlpha=p;ctx.textAlign='left';ctx.font='400 34px '+FONT;ctx.fillStyle=n>0?'#ffd34a':'rgba(255,255,255,.5)';ctx.fillText('×'+n,W/2-2,y+12);
+  ctx.textAlign='center';ctx.font='400 13px '+FONT;ctx.fillStyle='rgba(255,255,255,.65)';
+  ctx.fillText('A star every '+STAR_EVERY.toLocaleString()+' m · next one in '+Math.ceil((starsGot+1)*STAR_EVERY-dist)+' m',W/2,y+48);ctx.globalAlpha=1;
+}
+
+startScene();
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(1/30,(now-last)/1000);last=now;
+  if(state==='play')update(dt);else{t+=dt;endUpdate(dt);if(state==='intro')introUpdate(dt)}
+  for(const f of flyers)f.t+=dt;
+  const L=Math.min(level,100),vt=L<25?L/25*.35:.35+(L-25)/75*.65;
+  vl+=(vt-vl)*Math.min(1,dt*(state==='play'&&level<100?3:1.6));
+  draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>

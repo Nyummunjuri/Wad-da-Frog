@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Wad da Frog Attack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Boogaloo&display=swap" rel="stylesheet">
+<style>
+/* Side view: a little log raft on a swamp; frogs leap aboard, you flick them off before it sinks. */
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0c231d;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+#wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{display:block;touch-action:none;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.45)}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+{
+const W=360,H=640;
+const cv=document.getElementById('c');const ctx=cv.getContext('2d');
+const FONT='Boogaloo, system-ui, sans-serif';
+try{document.fonts.load('40px Boogaloo')}catch(e){}
+function resize(){
+  const s=Math.min(innerWidth/W,innerHeight/H),d=Math.min(2,window.devicePixelRatio||1);
+  cv.style.width=W*s+'px';cv.style.height=H*s+'px';cv.width=Math.round(W*s*d);cv.height=Math.round(H*s*d);
+  ctx.setTransform(s*d,0,0,s*d,0,0)}
+addEventListener('resize',resize);resize();
+
+// ---------- tuning ----------
+const SEA=430;                 // water surface (screen y)
+const RAFT_X=180,RW=252,RT=28; // raft centre x, deck length, log thickness
+const FREEBOARD=20;            // how far the empty deck sits above the water
+const SINK_PER=2.05;           // px the raft sinks per unit of frog weight
+const TILT_K=.00042,TILT_MAX=.42;  // tilt per (weight * px off centre), max tilt
+const G=1500;                  // gravity for flying frogs
+const SLIDE_AT=.2;             // frogs start sliding when the deck tilts more than this
+const SINK_TIME=3;             // seconds under water before the raft is lost
+const FLICK_MIN=520;           // px/s needed to send a light frog off
+const FAR=70;                  // land this far beyond the screen edge = gone for good
+// merge chain (Suika-style, on the raft): two of the same touch -> the next size up; weight adds up
+const KINDS={
+  small:{r:19,w:1,col:'#86d457',dark:'#4f9a2f',belly:'#e1f5b5',pts:1,next:'fat'},
+  fat:{r:25,w:2,col:'#4fb98a',dark:'#2c7f5b',belly:'#d3f2e2',pts:3,next:'big'},
+  big:{r:31,w:4,col:'#3f97b5',dark:'#22617a',belly:'#d3eef7',pts:8,next:'king'},
+  king:{r:38,w:8,col:'#e0b83a',dark:'#a07a14',belly:'#fff1bf',pts:20,next:null},
+};
+const TIER={small:0,fat:1,big:2,king:3};
+const WPOW=.35;   // how much heavier frogs resist a flick (need and throw speed scale with w^WPOW)
+
+// ---------- state ----------
+let state='title',t=0,score=0,best=0,bestNew=false,timeAlive=0,combo=0,comboT=0;
+let raft,frogs,flyers,swimmers,parts,texts,spawnT,sinkT,endT,hint,ptr=null,shake=0;
+try{best=+localStorage.getItem('wadAttackBest')||0}catch(e){}
+function reset(){
+  raft={y:SEA-FREEBOARD,vy:0,a:0,va:0,load:0};
+  frogs=[];flyers=[];swimmers=[];parts=[];texts=[];
+  spawnT=1.2;sinkT=0;score=0;combo=0;comboT=0;timeAlive=0;shake=0;bestNew=false;
+  hint={on:true,shown:0,done:false};
+}
+reset();
+const mkFrog=(kind)=>({kind,r:KINDS[kind].r,w:KINDS[kind].w,u:0,v:0,vu:0,vv:0,blink:Math.random()*3,squash:0,face:Math.random()<.5?-1:1,id:Math.random()});
+
+// ---------- raft geometry ----------
+// deck-local coords: u along the deck from its centre, v up from the deck surface
+function toWorld(u,v){const c=Math.cos(raft.a),s=Math.sin(raft.a);return[RAFT_X+u*c+v*s,raft.y+u*s-v*c]}
+function toLocal(x,y){const c=Math.cos(raft.a),s=Math.sin(raft.a),dx=x-RAFT_X,dy=y-raft.y;return[dx*c+dy*s,dx*s-dy*c]}
+const waveY=(x)=>SEA+Math.sin(x*.035+t*1.9)*2.6+Math.sin(x*.011-t*1.2)*2;
+
+// ---------- audio ----------
+let AC=null;
+function audioOn(){try{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume()}catch(e){AC=null}}
+function tone(f,d,type,vol,glide){if(!AC)return;try{const n=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();
+  o.type=type||'sine';o.frequency.setValueAtTime(f,n);if(glide)o.frequency.exponentialRampToValueAtTime(f*glide,n+d);
+  g.gain.setValueAtTime(vol||.15,n);g.gain.exponentialRampToValueAtTime(.001,n+d);o.connect(g);g.connect(AC.destination);o.start(n);o.stop(n+d+.02)}catch(e){}}
+function noise(d,vol,f){if(!AC)return;try{const n=AC.currentTime,b=AC.createBuffer(1,Math.ceil(AC.sampleRate*d),AC.sampleRate),a=b.getChannelData(0);
+  for(let i=0;i<a.length;i++)a[i]=(Math.random()*2-1)*(1-i/a.length);const s=AC.createBufferSource(),fl=AC.createBiquadFilter(),g=AC.createGain();
+  s.buffer=b;fl.type='lowpass';fl.frequency.value=f||1200;g.gain.value=vol||.2;s.connect(fl);fl.connect(g);g.connect(AC.destination);s.start(n)}catch(e){}}
+const sJump=()=>tone(300,.18,'triangle',.1,2.2);
+const sLand=(w)=>{tone(140/Math.sqrt(w),.16,'sine',.18+.04*w,.6);noise(.08,.08,600)};
+const sFlick=()=>{noise(.14,.13,2400);tone(520,.12,'triangle',.08,1.8)};
+const sSplash=(big)=>{noise(.32,big?.28:.18,big?900:1400);tone(180,.2,'sine',.1,.5)};
+const sScore=(c)=>tone(660*Math.pow(1.122,Math.min(c,10)),.12,'triangle',.1);
+const sMerge=(tier)=>{const f=[523,659,784,1047][tier]||1047;tone(f,.14,'triangle',.13);setTimeout(()=>tone(f*1.5,.2,'triangle',.11),70)};
+const sTick=()=>tone(1500,.05,'square',.05);
+const sSad=()=>{tone(440,.25,'triangle',.13,.7);setTimeout(()=>tone(330,.4,'triangle',.13,.6),220)};
+
+// ---------- spawning ----------
+function kindFor(){return timeAlive>35&&Math.random()<.18?'fat':'small'}
+function spawnSwimmer(kind,side){
+  side=side||(Math.random()<.5?-1:1);
+  swimmers.push({kind,r:KINDS[kind].r,w:KINDS[kind].w,x:side<0?-30:W+30,dir:-side,t:0,wait:.4+Math.random()*.8,bob:Math.random()*6,returning:false});
+}
+// leap from the water onto a spot on the deck
+function leap(s){
+  const tu=(Math.random()*.8-.4)*RW,[tx,ty]=toWorld(tu,s.r);
+  const dur=.62+Math.random()*.12,sx=s.x,sy=waveY(s.x)+s.r*.3;
+  flyers.push({kind:s.kind,r:s.r,w:s.w,x:sx,y:sy,vx:(tx-sx)/dur,vy:(ty-sy)/dur-G*dur/2,t:0,rot:0,spin:0,flicked:false,face:s.dir,angry:s.returning});
+  splash(sx,s.r*.6);sJump();
+}
+
+// ---------- effects ----------
+function burst(x,y,c,n,sp){for(let i=0;i<n;i++){const a=Math.random()*Math.PI*2,v=(sp||120)*(.4+Math.random()*.8);
+  parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-60,r:1.5+Math.random()*2.5,c,life:.5+Math.random()*.4,g:400})}}
+function splash(x,big){const y=waveY(x);
+  for(let i=0;i<8+big;i++){const a=-Math.PI/2+(Math.random()-.5)*1.6,v=90+Math.random()*120+big*6;
+    parts.push({x:x+(Math.random()-.5)*big,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:1.5+Math.random()*2.5,c:'rgba(210,245,240,.9)',life:.6,g:500})}
+  parts.push({ring:true,x,y,r:big*.6,life:.6,max:.6})}
+function say(x,y,s,c,size){texts.push({x,y,s,c,size:size||22,life:1})}
+
+// ---------- update ----------
+function update(dt){
+  t+=dt;timeAlive+=dt;if(comboT>0){comboT-=dt;if(comboT<=0)combo=0}
+  // spawn: gets busier over time
+  spawnT-=dt;if(spawnT<=0){const rate=Math.max(.55,2.1-timeAlive*.022);spawnT=rate*(.7+Math.random()*.6);
+    spawnSwimmer(kindFor());if(timeAlive>25&&Math.random()<.3)spawnSwimmer('small')}
+  // swimmers paddle in, then leap aboard
+  for(const s of swimmers){s.t+=dt;const edge=RAFT_X-s.dir*(RW/2+40+s.r);
+    const dx=edge-s.x;if(Math.abs(dx)>4)s.x+=Math.sign(dx)*Math.min(Math.abs(dx),(70+20*Math.sin(s.t*6))*dt);
+    else{s.wait-=dt;if(s.wait<=0){s.dead=true;leap(s)}}}
+  swimmers=swimmers.filter(s=>!s.dead);
+  // raft: weight sinks it, weight off-centre tilts it
+  let load=0,torque=0;for(const f of frogs){load+=f.w;torque+=f.w*f.u}
+  raft.load=load;
+  const ty=SEA-FREEBOARD+load*SINK_PER,ta=Math.max(-TILT_MAX,Math.min(TILT_MAX,torque*TILT_K));
+  raft.vy+=((ty-raft.y)*28-raft.vy*7)*dt;raft.y+=raft.vy*dt+Math.sin(t*1.9)*.08;
+  raft.va+=((ta-raft.a)*22-raft.va*6)*dt;raft.a+=raft.va*dt;
+  // frogs on deck: gravity in deck coords, slide when tilted, push each other, fall off the ends
+  const ga=raft.a,gu=G*.45*Math.sin(ga),gv=-G*.45*Math.cos(ga);
+  for(const f of frogs){if(f===held())continue;
+    f.vv+=gv*dt;f.v+=f.vv*dt;
+    if(f.v<f.r){f.v=f.r;if(f.vv<-60)f.squash=.25;f.vv=0;
+      if(Math.abs(ga)>SLIDE_AT)f.vu+=gu*dt;else f.vu*=Math.max(0,1-dt*12)}
+    else f.vu+=gu*dt*.3;
+    f.u+=f.vu*dt;f.squash=Math.max(0,f.squash-dt*1.6);if(f.pop>0)f.pop=Math.max(0,f.pop-dt*1.5);f.blink-=dt;if(f.blink<0)f.blink=2+Math.random()*3}
+  for(let k=0;k<3;k++)for(let i=0;i<frogs.length;i++)for(let j=i+1;j<frogs.length;j++){const a=frogs[i],b=frogs[j];
+    const du=b.u-a.u,dv=b.v-a.v,d=Math.hypot(du,dv),m=a.r+b.r-2;
+    if(d<m&&d>0){const o=(m-d)/2,nu=du/d,nv=dv/d,ha=a===held(),hb=b===held();
+      if(!ha){a.u-=nu*o*(hb?2:1);a.v=Math.max(a.r,a.v-nv*o*(hb?2:1))}if(!hb){b.u+=nu*o*(ha?2:1);b.v=Math.max(b.r,b.v+nv*o*(ha?2:1))}}}
+  // Suika merge: two frogs of the same size touching on the deck become one bigger frog
+  for(let i=0;i<frogs.length;i++)for(let j=i+1;j<frogs.length;j++){const a=frogs[i],b=frogs[j];
+    if(a.dead||b.dead||a.kind!==b.kind||!KINDS[a.kind].next||a===held()||b===held())continue;
+    if(t-(a.born||0)<.15||t-(b.born||0)<.15)continue;
+    if(Math.hypot(b.u-a.u,b.v-a.v)<a.r+b.r+1){a.dead=b.dead=true;
+      const k=KINDS[a.kind].next,g=mkFrog(k);g.u=(a.u+b.u)/2;g.v=Math.max(KINDS[k].r,(a.v+b.v)/2);g.squash=.55;g.pop=.3;g.born=t;g.angry=a.angry||b.angry;g.face=a.face;
+      frogs.push(g);const[x,y]=toWorld(g.u,g.v);burst(x,y,KINDS[k].belly,14,170);burst(x,y,'#ffe27a',8,120);
+      sMerge(TIER[k]);raft.vy+=30;if(k==='king')say(x,y-g.r-24,'KING FROG!','#ffe27a',26)}}
+  frogs=frogs.filter(f=>!f.dead);
+  for(const f of frogs){if(f===held())continue;
+    if(Math.abs(f.u)>RW/2+f.r*.2){f.dead=true;const[x,y]=toWorld(f.u,f.v);
+      flyers.push({kind:f.kind,r:f.r,w:f.w,x,y,vx:Math.sign(f.u)*90+f.vu*.4,vy:-40,t:0,rot:0,spin:Math.sign(f.u)*4,flicked:true,face:f.face,slid:true})}}
+  frogs=frogs.filter(f=>!f.dead);
+  // flying frogs: land on the deck, or splash
+  for(const f of flyers){f.t+=dt;f.vy+=G*dt;f.x+=f.vx*dt;f.y+=f.vy*dt;f.rot+=f.spin*dt;
+    if(f.vy>0){const[lu,lv]=toLocal(f.x,f.y);
+      if(Math.abs(lu)<RW/2&&lv<f.r&&lv>-RT){f.dead=true;const g=mkFrog(f.kind);g.u=lu;g.v=f.r;g.vu=f.vx*.15;g.squash=.4;g.face=f.face;g.angry=f.angry;g.born=t;frogs.push(g);
+        raft.vy+=f.w*40;raft.va+=lu*f.w*.0009;sLand(f.w);burst(...toWorld(lu,0),'rgba(140,100,60,.8)',4,60);
+        if(TIER[f.kind]>=2){shake=.2;burst(...toWorld(lu,0),'#fff3c8',10,160)}continue}}
+    const gone=f.flicked&&(f.x<-f.r*1.5||f.x>W+f.r*1.5);
+    if(gone||(f.y>waveY(f.x)+f.r*.4&&f.vy>0)){f.dead=true;if(!gone)splash(f.x,f.r);sSplash(f.w>2);
+      const out=gone||f.x<-f.r||f.x>W+f.r;
+      // only a frog the player flicked scores (one that slid off the tilted deck doesn't)
+      if(f.flicked&&!f.slid){combo++;comboT=1.3;const pts=KINDS[f.kind].pts*(out?2:1)*Math.min(5,combo);score+=pts;sScore(combo);
+        say(Math.max(30,Math.min(W-30,f.x)),SEA-40,(out?'OUT! ':'')+'+'+pts+(combo>1?' x'+Math.min(5,combo):''),out?'#ffe27a':'#fff',out?26:21)}
+      // anything that lands in the water near the raft swims back for another go; flicked off-screen = gone for good
+      if(!out)swimmers.push({kind:f.kind,r:f.r,w:f.w,x:f.x,dir:f.x<RAFT_X?1:-1,t:0,wait:1.4+Math.random(),bob:0,returning:true,pop:.5})}
+    if(f.x<-120||f.x>W+120||f.y>H+60)f.dead=true}
+  flyers=flyers.filter(f=>!f.dead);
+  // sinking: deck (or its low end) under water
+  const[lx,ly]=toWorld(-RW/2,0),[rx,ry]=toWorld(RW/2,0),low=Math.max(ly-waveY(lx),ry-waveY(rx)),mid=raft.y-SEA;
+  const under=mid>-2||low>14;
+  if(under){const before=Math.ceil(SINK_TIME-sinkT);sinkT+=dt;if(Math.ceil(SINK_TIME-sinkT)<before)sTick();
+    if(sinkT>=SINK_TIME){lose();return}}
+  else sinkT=Math.max(0,sinkT-dt*1.5);
+  // effects
+  for(const p of parts){p.life-=dt;if(p.ring){p.r+=60*dt;continue}p.vy+=(p.g||0)*dt;p.x+=p.vx*dt;p.y+=p.vy*dt}
+  parts=parts.filter(p=>p.life>0);
+  for(const s of texts){s.life-=dt;s.y-=30*dt}texts=texts.filter(s=>s.life>0);
+  shake=Math.max(0,shake-dt);
+  // first-time hint: point at the first frog aboard until it's flicked
+  if(hint.on&&frogs.length)hint.shown+=dt;
+}
+function lose(){state='over';endT=t;sSad();
+  for(const f of frogs){const[x,y]=toWorld(f.u,f.v);flyers.push({kind:f.kind,r:f.r,w:f.w,x,y,vx:(x-RAFT_X)*2+(Math.random()-.5)*80,vy:-300-Math.random()*200,t:0,rot:0,spin:(Math.random()-.5)*8,flicked:false,face:f.face})}
+  frogs=[];bestNew=score>best;if(bestNew){best=score;try{localStorage.setItem('wadAttackBest',best)}catch(e){}}}
+function endUpdate(dt){t+=dt;
+  raft.y+=(SEA+70-raft.y)*dt*1.2;raft.a+=(.25-raft.a)*dt;
+  for(const f of flyers){f.vy+=G*dt;f.x+=f.vx*dt;f.y+=f.vy*dt;f.rot+=f.spin*dt;if(!f.sp&&f.y>waveY(f.x)&&f.vy>0){f.sp=1;splash(f.x,f.r)}}
+  flyers=flyers.filter(f=>f.y<H+60);
+  for(const p of parts){p.life-=dt;if(p.ring){p.r+=60*dt;continue}p.vy+=(p.g||0)*dt;p.x+=p.vx*dt;p.y+=p.vy*dt}parts=parts.filter(p=>p.life>0);
+  for(const s of texts){s.life-=dt;s.y-=30*dt}texts=texts.filter(s=>s.life>0)}
+
+// ---------- input: grab a frog on the raft and flick it ----------
+const held=()=>ptr&&ptr.frog;
+function pos(e){const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)/r.width*W,y:(e.clientY-r.top)/r.height*H}}
+cv.addEventListener('pointerdown',e=>{audioOn();const p=pos(e);
+  if(state==='title'){state='play';reset();spawnSwimmer('small',1);spawnT=3.5;return}
+  if(state==='over'){if(t-endT>1.2){state='play';reset();spawnSwimmer('small',1);spawnT=2.5}return}
+  let best=null,bd=1e9;for(const f of frogs){const[x,y]=toWorld(f.u,f.v),d=Math.hypot(x-p.x,y-p.y);if(d<f.r+26&&d<bd){bd=d;best=f}}
+  if(best){ptr={frog:best,hist:[{x:p.x,y:p.y,t:performance.now()}],x0:p.x,y0:p.y,id:e.pointerId};try{cv.setPointerCapture(e.pointerId)}catch(_){}}
+});
+cv.addEventListener('pointermove',e=>{if(!ptr)return;const p=pos(e);ptr.hist.push({x:p.x,y:p.y,t:performance.now()});if(ptr.hist.length>8)ptr.hist.shift();ptr.x=p.x;ptr.y=p.y});
+function release(){if(!ptr)return;const f=ptr.frog,h=ptr.hist,a=h[0],b=h[h.length-1],dt=Math.max(.016,(b.t-a.t)/1000);
+  let vx=(b.x-a.x)/dt,vy=(b.y-a.y)/dt;ptr=null;
+  const sp=Math.hypot(vx,vy),wk=Math.pow(f.w,WPOW),need=FLICK_MIN*wk;
+  if(sp<need*.45||!frogs.includes(f))return;   // just a tap: nothing happens
+  // heavier frogs fly slower; a weak flick on a heavy frog just hops it along the deck
+  const k=Math.min(1.25,sp/need)/wk,cap=1600*wk;let fx=vx/sp*Math.min(cap,sp)*k,fy=vy/sp*Math.min(cap,sp)*k-160;
+  if(sp<need){fx*=.55;fy*=.55}
+  const[x,y]=toWorld(f.u,f.v);f.dead=true;frogs=frogs.filter(g=>g!==f);
+  flyers.push({kind:f.kind,r:f.r,w:f.w,x,y,vx:fx,vy:fy,t:0,rot:0,spin:Math.sign(fx)*9/wk,flicked:true,face:Math.sign(fx)||1,angry:true});
+  raft.vy-=f.w*25;raft.va-=f.u*f.w*.0006;sFlick();hint.on=false}
+cv.addEventListener('pointerup',release);cv.addEventListener('pointercancel',release);
+
+// ---------- drawing ----------
+function ell(x,y,rx,ry){ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fill()}
+function drawFrog(x,y,kind,r,rot,face,squash,blink,stretch,angry){
+  const K=KINDS[kind];ctx.save();ctx.translate(x,y);ctx.rotate(rot||0);
+  const sq=squash||0,sx=(1+sq*.35)*(1-(stretch||0)*.2),sy=(1-sq*.3)*(1+(stretch||0)*.35);ctx.scale(sx*(face||1)<0?-sx:sx,sy);
+  // back legs
+  ctx.fillStyle=K.dark;ell(-r*.62,r*.55,r*.42,r*.28);ell(r*.62,r*.55,r*.42,r*.28);
+  // body
+  ctx.fillStyle=K.col;ctx.beginPath();ctx.ellipse(0,0,r,r*.86,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=K.belly;ell(0,r*.3,r*.62,r*.45);
+  // eyes on top
+  for(const ex of[-.45,.45]){ctx.fillStyle=K.col;ell(ex*r,-r*.62,r*.34,r*.32);
+    ctx.fillStyle='#fff';ell(ex*r,-r*.65,r*.24,(blink&&blink<.12)?r*.03:r*.23);
+    if(!(blink&&blink<.12)){ctx.fillStyle='#1d2420';ell(ex*r+r*.05,-r*.63,r*.11,r*.12)}}
+  // mouth
+  ctx.strokeStyle=K.dark;ctx.lineWidth=Math.max(1.6,r*.09);ctx.lineCap='round';ctx.beginPath();
+  if(angry){ctx.moveTo(-r*.3,r*.06);ctx.quadraticCurveTo(0,-r*.06,r*.3,r*.06);ctx.stroke();
+    ctx.lineWidth=Math.max(2,r*.1);ctx.beginPath();ctx.moveTo(-r*.72,-r*1.0);ctx.lineTo(-r*.22,-r*.82);ctx.moveTo(r*.72,-r*1.0);ctx.lineTo(r*.22,-r*.82);ctx.stroke()}
+  else{ctx.arc(0,-r*.05,r*.42,.25*Math.PI,.75*Math.PI);ctx.stroke()}
+  if(kind==='king'){ctx.fillStyle='#ffd23a';ctx.strokeStyle='#a07a14';ctx.lineWidth=2;ctx.beginPath();
+    ctx.moveTo(-r*.42,-r*.95);ctx.lineTo(-r*.42,-r*1.35);ctx.lineTo(-r*.2,-r*1.15);ctx.lineTo(0,-r*1.42);ctx.lineTo(r*.2,-r*1.15);ctx.lineTo(r*.42,-r*1.35);ctx.lineTo(r*.42,-r*.95);ctx.closePath();ctx.fill();ctx.stroke()}
+  // cheeks
+  ctx.fillStyle='rgba(255,120,120,.35)';ell(-r*.62,r*.05,r*.13,r*.08);ell(r*.62,r*.05,r*.13,r*.08);
+  ctx.restore()}
+function drawRaft(){
+  ctx.save();ctx.translate(RAFT_X,raft.y);ctx.rotate(raft.a);
+  // logs (seen from the side: one long log with rope bands and cut ends)
+  ctx.fillStyle='#7a4a24';ctx.beginPath();ctx.roundRect?ctx.roundRect(-RW/2,0,RW,RT,RT/2):ctx.rect(-RW/2,0,RW,RT);ctx.fill();
+  ctx.fillStyle='#9a6232';ctx.beginPath();ctx.roundRect?ctx.roundRect(-RW/2+2,1,RW-4,RT*.55,RT/3):ctx.rect(-RW/2,1,RW,RT*.5);ctx.fill();
+  ctx.strokeStyle='rgba(60,35,15,.45)';ctx.lineWidth=1.5;
+  for(const k of[-.32,.06,.38]){ctx.beginPath();ctx.moveTo(k*RW,RT*.3);ctx.lineTo(k*RW+40,RT*.32);ctx.stroke()}
+  ctx.fillStyle='#e0c58a';for(const k of[-.36,0,.36]){ctx.fillRect(k*RW-4,-1,8,RT+2)}
+  ctx.strokeStyle='rgba(120,90,40,.6)';ctx.lineWidth=1;for(const k of[-.36,0,.36]){ctx.beginPath();ctx.moveTo(k*RW-4,RT*.5);ctx.lineTo(k*RW+4,RT*.5);ctx.stroke()}
+  for(const s of[-1,1]){ctx.fillStyle='#b98352';ell(s*(RW/2-RT*.35),RT/2,RT*.35,RT*.5);ctx.strokeStyle='#7a4a24';ctx.lineWidth=1.2;ctx.beginPath();ctx.ellipse(s*(RW/2-RT*.35),RT/2,RT*.18,RT*.28,0,0,Math.PI*2);ctx.stroke()}
+  // a little mast with a flag
+  ctx.fillStyle='#6b3f1f';ctx.fillRect(-3,-62,5,62);ctx.fillStyle='#ffe27a';ctx.beginPath();ctx.moveTo(2,-60);ctx.lineTo(30+Math.sin(t*5)*3,-52);ctx.lineTo(2,-44);ctx.fill();
+  ctx.restore()}
+function water(front){
+  ctx.beginPath();ctx.moveTo(0,H);for(let x=0;x<=W;x+=8)ctx.lineTo(x,waveY(x));ctx.lineTo(W,H);ctx.closePath();
+  if(front){ctx.fillStyle='rgba(28,86,72,.62)';ctx.fill();
+    ctx.strokeStyle='rgba(215,245,238,.7)';ctx.lineWidth=2;ctx.beginPath();for(let x=0;x<=W;x+=8){x?ctx.lineTo(x,waveY(x)):ctx.moveTo(x,waveY(x))}ctx.stroke()}
+  else{const g=ctx.createLinearGradient(0,SEA,0,H);g.addColorStop(0,'#2a6f5c');g.addColorStop(1,'#0f3a30');ctx.fillStyle=g;ctx.fill()}}
+let bg=null;
+function drawBg(){
+  if(!bg){const c=document.createElement('canvas');c.width=W*2;c.height=H*2;const b=c.getContext('2d');b.scale(2,2);
+    const g=b.createLinearGradient(0,0,0,SEA);g.addColorStop(0,'#9fd8c8');g.addColorStop(1,'#d8efd0');b.fillStyle=g;b.fillRect(0,0,W,SEA+10);
+    b.fillStyle='rgba(255,255,255,.7)';for(const[x,y,s]of[[60,90,1],[260,60,.8],[300,150,.6]]){b.beginPath();b.ellipse(x,y,40*s,14*s,0,0,7);b.ellipse(x+25*s,y-8*s,26*s,14*s,0,0,7);b.fill()}
+    b.fillStyle='#6fae7c';b.beginPath();b.moveTo(0,SEA);for(let x=0;x<=W;x+=20)b.lineTo(x,SEA-40-Math.sin(x*.05)*14-Math.sin(x*.13)*8);b.lineTo(W,SEA);b.fill();
+    b.fillStyle='#4f9466';b.beginPath();b.moveTo(0,SEA);for(let x=0;x<=W;x+=14)b.lineTo(x,SEA-18-Math.abs(Math.sin(x*.09))*16);b.lineTo(W,SEA);b.fill();
+    b.strokeStyle='#3d7a4f';b.lineWidth=2;for(let i=0;i<26;i++){const x=(i*37)%W,h=20+(i*13)%30;b.beginPath();b.moveTo(x,SEA);b.quadraticCurveTo(x+4,SEA-h/2,x+(i%2?6:-6),SEA-h);b.stroke()}
+    bg=c}
+  ctx.drawImage(bg,0,0,W,H)}
+function drawHand(x,y,a,press){ctx.save();ctx.globalAlpha=a;
+  if(press>0){ctx.strokeStyle='rgba(255,255,255,'+(.8*(1-press))+')';ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y,8+press*18,0,7);ctx.stroke()}
+  ctx.translate(x,y);ctx.rotate(-.35);ctx.fillStyle='#fff';ctx.strokeStyle='rgba(20,40,30,.55)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect?ctx.roundRect(-8,-2,16,30,8):ctx.rect(-8,-2,16,30);ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.roundRect?ctx.roundRect(-10,16,28,26,10):ctx.rect(-10,16,28,26);ctx.fill();ctx.stroke();ctx.restore()}
+function text(s,x,y,size,col,align){ctx.font='400 '+size+'px '+FONT;ctx.textAlign=align||'center';ctx.lineWidth=Math.max(3,size*.16);ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(10,35,28,.65)';ctx.strokeText(s,x,y);ctx.fillStyle=col||'#fff';ctx.fillText(s,x,y)}
+
+function draw(){
+  ctx.save();if(shake>0)ctx.translate((Math.random()-.5)*10*shake,(Math.random()-.5)*10*shake);
+  drawBg();water(false);
+  // swimmers (heads above water)
+  for(const s of swimmers){const y=waveY(s.x)+s.r*.35+Math.sin(t*4+s.bob)*1.5;drawFrog(s.x,y,s.kind,s.r,0,s.dir,0,0,0,s.returning);
+    ctx.strokeStyle='rgba(215,245,238,.6)';ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(s.x,waveY(s.x)+2,s.r*1.1,3,0,0,7);ctx.stroke()}
+  drawRaft();
+  for(const f of frogs){const[x,y]=toWorld(f.u,f.v);let px=x,py=y,st=0;
+    if(f===held()&&ptr.x!=null){const dx=ptr.x-x,dy=ptr.y-y,d=Math.hypot(dx,dy),k=Math.min(1,d/90);px+=dx*.25*k;py+=dy*.25*k;st=k*.6}
+    const pop=f.pop>0?1+f.pop*.6:1;drawFrog(px,py-(pop-1)*f.r*.5,f.kind,f.r*pop,raft.a,f.face,f.squash,f.blink,st,f.angry)}
+  for(const f of flyers){const sp=Math.hypot(f.vx,f.vy);drawFrog(f.x,f.y,f.kind,f.r,f.rot,f.face,0,1,Math.min(.5,sp/2400),f.angry)}
+  water(true);
+  for(const p of parts){if(p.ring){ctx.strokeStyle='rgba(215,245,238,'+(p.life/p.max)+')';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(p.x,p.y+2,p.r,p.r*.22,0,0,7);ctx.stroke();continue}
+    ctx.globalAlpha=Math.min(1,p.life*2);ctx.fillStyle=p.c;ell(p.x,p.y,p.r,p.r);ctx.globalAlpha=1}
+  for(const s of texts){ctx.globalAlpha=Math.min(1,s.life*2);text(s.s,s.x,s.y,s.size,s.c);ctx.globalAlpha=1}
+  ctx.restore();
+  if(state==='play')drawHUD();
+  if(state==='title')drawTitle();
+  if(state==='over')drawOver()}
+function drawHUD(){
+  text(String(score),W/2,58,48,'#fff');text('FROGS OFF',W/2,80,15,'rgba(255,255,255,.85)');
+  if(combo>1&&comboT>0)text('x'+Math.min(5,combo)+' combo!',W/2,108,22,'#ffe27a');
+  // sinking warning: red flash + countdown bar
+  if(sinkT>0){const f=1-sinkT/SINK_TIME;ctx.fillStyle='rgba(230,40,30,'+(.12+.12*Math.sin(t*20))+')';ctx.fillRect(0,0,W,H);
+    const x=W/2-70,y=140;ctx.fillStyle='rgba(6,20,16,.7)';ctx.fillRect(x-3,y-3,146,16);ctx.fillStyle='#ff4d3a';ctx.fillRect(x,y,140*f,10);
+    text('SINKING!',W/2,y-8,20,'#ffd0c8')}
+  // load gauge on the mast-side: how close the deck is to the water
+  const fill=Math.max(0,Math.min(1,(raft.y-(SEA-FREEBOARD))/(FREEBOARD)));
+  ctx.fillStyle='rgba(6,20,16,.55)';ctx.fillRect(W-26,190,12,120);ctx.fillStyle=fill>.8?'#ff4d3a':fill>.55?'#ffb03a':'#7ccf4f';ctx.fillRect(W-26,190+120*(1-fill),12,120*fill);
+  text('LOAD',W-20,184,13,'rgba(255,255,255,.8)');
+  // first-time hint: a finger flicks the first frog off the raft
+  if(hint.on&&frogs.length&&hint.shown>.4){const f=frogs[0],[x,y]=toWorld(f.u,f.v),c=(t%1.3)/1.3,dir=f.u<0?-1:1,m=Math.max(0,Math.min(1,(c-.2)/.35)),e=m*m*(3-2*m);
+    const a=c<.1?c/.1:c>.8?Math.max(0,1-(c-.8)/.12):1,hx=x+dir*110*e,hy=y-60*e;
+    if(e>0){ctx.strokeStyle='rgba(255,255,255,'+(.5*a)+')';ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(hx,hy);ctx.stroke()}
+    drawHand(hx,hy,a,c<.2?c/.2:0);text('Flick!',x,y-f.r-24,24,'#ffe27a')}}
+function drawTitle(){
+  ctx.fillStyle='rgba(6,25,20,.25)';ctx.fillRect(0,0,W,H);
+  text('Wad da Frog',W/2,150,52,'#fff');text('ATTACK!',W/2,198,44,'#ff7a5c');
+  ctx.globalAlpha=.6+Math.sin(performance.now()/300)*.4;text('Tap to start',W/2,300,24,'#fff');ctx.globalAlpha=1;
+  if(best)text('Best '+best,W/2,H-28,18,'rgba(255,255,255,.75)')}
+function drawOver(){const e=t-endT,k=Math.min(1,e/.6);
+  ctx.fillStyle='rgba(6,25,20,'+(.55*k)+')';ctx.fillRect(0,0,W,H);if(e<.4)return;
+  text('Sunk!',W/2,170,56,'#fff');text(String(score),W/2,250,64,'#ffe27a');text('frogs flicked off',W/2,280,20,'rgba(255,255,255,.85)');
+  text(bestNew?'New best!':'Best '+best,W/2,330,24,bestNew?'#ffe27a':'rgba(255,255,255,.8)');
+  if(e>1.2){ctx.globalAlpha=.6+Math.sin(performance.now()/300)*.4;text('Tap to play again',W/2,420,22,'#fff');ctx.globalAlpha=1}}
+
+// ---------- loop ----------
+// title scene: one frog already sitting on the raft
+frogs.push(Object.assign(mkFrog('small'),{u:-30,v:15}));
+let last=performance.now();
+function loop(now){const dt=Math.min(.033,(now-last)/1000);last=now;
+  if(state==='play')update(dt);else if(state==='over')endUpdate(dt);else{t+=dt;raft.y=SEA-FREEBOARD+Math.sin(t*1.9)*1.5}
+  draw();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>

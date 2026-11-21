@@ -207,7 +207,10 @@ function tutStep(n){tut=n;tutT=0;tutNext=0;tutFade=0;
   if(n===3){tutPhase='fill';tutSpawnT=.3;tutPeak=0}   // fill: watch it sink once · sunk: frogs bail, kayak refloats · try: your turn
   if(n===4){while(raft.length>1){const f=raft.pop();burst(f.px,f.py,'rgba(200,240,255,.8)',8)}
     if(raft[0])raft[0].tier=0;tutEater=null;tutEatPhase='feed'}
-  if(n===5){tutRed=null}
+  if(n===5){tutRed=null;
+    // clear stray eggs so the red frogs don't eat them; the bow gets a red teen to throw
+    for(const b of items)if(b.tier===0&&!b.dead){b.dead=true;burst(b.x,b.y,'#cfe9ff',5)}
+    raft=[];board(TEEN,'red',...K(BOW_X,NEXT_Y))}
 }
 function endTutorial(){
   tut=0;tutDone=true;
@@ -255,13 +258,21 @@ function tutUpdate(dt){
     else if(!swimmers.length&&tutT>.5){tutEatPhase='done';tutNext=1.6}
     return}
   if(tut===5){
-    if(!tutRed&&tutT>.7){attack(180,TOP+GR*.6,CHARGE+.25);tutRed=attackers[attackers.length-1]}
+    if(!tutRed){const free=attackers.find(a=>!a.swatted);
+      if(free)tutRed=free;
+      else if(!items.some(b=>b.charge&&b.sp==='red')){
+        if(!tutRedTarget()){const b=mk(TEEN,'red',180,190,0,0);b.pop=.25;items.push(b);burst(180,190,'#ff8c7a',10)}
+        if(!raft.length)board(TEEN,'red',...K(SIDE_X,SIDE_Y));
+        else if(raft[0].d<4&&!(raft[0].tier===TEEN&&raft[0].sp==='red')){raft[0].tier=TEEN;raft[0].sp='red'}}}
     if(tutRed&&tutRed.swatted)tutNext=1.1;
     if(!raft.length)board(0,null,...K(SIDE_X,SIDE_Y))}
 }
 function tutSank(){if(tutPhase==='sunk')return;tutPhase='sunk';tutSunkT=0;sadSound();drag=null;
   jumpers=raft.map(it=>({x:it.px,y:it.py,tier:it.tier,sp:it.sp,vx:(it.px-180)*2.2+(Math.random()-.5)*80,vy:-220-Math.random()*160,rot:0,spin:(Math.random()-.5)*10}));
   raft=[];flood=0;floodIn=0}
+function tutRedTarget(){let best=null,bd=1e9;
+  for(const b of items){if(b.dead||b.thrown||b.tier!==TEEN||b.sp!=='red'||b.enter>0||b.charge)continue;const d=Math.abs(b.x-180)+Math.abs(b.y-180)*.5;if(d<bd){bd=d;best=b}}
+  return best}
 function tutThrew(){if(tut===1&&!tutNext)tutNext=1.1}
 function tutMerged(tier){if(tut!==2||tutNext)return;if(tier>=2)tutNext=1.2;else tutNeed=1}
 // a pointing finger (fingertip at x,y)
@@ -300,7 +311,7 @@ function drawTut(){
   if(tutMsgT>0&&!tut){tutLabel('Go! Paddle as far as you can',300,Math.min(1,tutMsgT/.4));return}
   if(!tut)return;
   const a=tutNext>0?Math.max(0,tutNext/.5):tutFade;
-  const lab=tut===4?(tutEatPhase==='feed'?'Grown frogs eat eggs. Feed it 3!':'Full! It swims back to the front of the line'):tut!==3?TUT_TEXT[tut]:tutPhase==='fill'?'Too many frogs = the kayak sinks…':tutPhase==='sunk'?'Sunk = Game over!':tutPeak<1?'Here they come again…':'Throw frogs off before it sinks!';
+  const lab=tut===4?(tutEatPhase==='feed'?'Grown frogs eat eggs. Feed it 3!':'Full! It swims back to the front of the line'):tut===5?(tutRed?'Red giants attack! Tap it before it lands!':'Merge 2 red frogs…'):tut!==3?TUT_TEXT[tut]:tutPhase==='fill'?'Too many frogs = the kayak sinks…':tutPhase==='sunk'?'Sunk = Game over!':tutPeak<1?'Here they come again…':'Throw frogs off before it sinks!';
   tutLabel(lab,tut===5?440:300,Math.min(1,a));
   // skip, bottom-right
   ctx.save();ctx.globalAlpha=.9;ctx.fillStyle='rgba(6,20,16,.72)';ctx.strokeStyle='rgba(255,255,255,.55)';ctx.lineWidth=1.5;
@@ -317,6 +328,9 @@ function drawTut(){
     // little "bites" counter over its head
     for(let i=0;i<3;i++){ctx.fillStyle=i<(g.fat||0)?'#ffe27a':'rgba(255,255,255,.25)';dot(g.x-12+i*12,g.y-g.r-14,4)}
     if(!items.some(b=>b.thrown))drawSwipe(g.x,g.y)}
+  if(tut===5&&!tutRed){const g=tutRedTarget();if(g){const pu=Math.sin(tutT*6)*.5+.5;
+      ctx.strokeStyle='rgba(255,226,122,'+(.5+.4*pu)+')';ctx.lineWidth=3;ctx.beginPath();ctx.arc(g.x,g.y,g.r+6+pu*5,0,Math.PI*2);ctx.stroke();
+      if(!items.some(b=>b.thrown))drawSwipe(g.x,g.y)}}
   if(tut===5&&tutRed&&!tutRed.swatted&&tutRed.pre<=0){const c=(tutT%.9)/.9;drawHand(tutRed.x+10,tutRed.y+8-Math.sin(c*Math.PI)*10,c>.5?(c-.5)*2:0,1)}
 }
 
@@ -628,6 +642,9 @@ function update(dt){
     level+=Math.sign(d)*Math.min(Math.abs(d),Math.max(8,Math.abs(d)*1.6)*dt)}
   level=Math.max(0,level);
   if(level>=100){level=100;if(tut)tutSank();else gameOver()}
+  // bubbles popping up along the hull while it's low in the water
+  if(vl>.35&&Math.random()<dt*(6+vl*22)){const left=Math.random()<.5,u=.1+Math.random()*.8,[hx,hy]=K(...bez(left?HL:HR,u));
+    parts.push({x:hx+(left?-1:1)*(2+Math.random()*6),y:hy,vx:(Math.random()-.5)*8,vy:-10-Math.random()*14,r:1.5+Math.random()*2.5,c:'rgba(215,245,240,.8)',life:.7})}
   // the kayak shakes while it is going under
   pan+=((over?.5+.5*clamp((level-FULL_LEVEL)/(100-FULL_LEVEL),0,1):0)-pan)*Math.min(1,dt*6);
 
@@ -808,6 +825,7 @@ function drawKayak(off){
     ctx.save();ctx.globalAlpha=.28+.3*vl;ctx.translate(180,600);ctx.scale(150*R,150*R*.95);ctx.fillStyle=shadowGrad;ctx.fillRect(-1,-1,2,2);ctx.restore()}
   if(vl>.03){ctx.strokeStyle='rgba(6,28,26,'+Math.min(.5,vl*1.2)+')';ctx.lineWidth=4+vl*14;ctx.lineJoin='round';hullPath();ctx.stroke()}
   ctx.fillStyle='#e9823f';hullPath();ctx.fill();
+  if(vl>.05){ctx.fillStyle='rgba(12,48,46,'+(.38*vl)+')';hullPath();ctx.fill()}
   ctx.fillStyle='rgba(0,0,0,.12)';
   ctx.beginPath();ctx.moveTo(180,478);ctx.bezierCurveTo(214,504,276,576,279,648);ctx.lineTo(217,648);ctx.bezierCurveTo(215,576,194,507,180,478);ctx.fill();
   ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=2;
@@ -827,15 +845,21 @@ function drawKayak(off){
       dot(CK.x+Math.cos(a)*rx*d,CK.y+Math.sin(a)*ry*d-ph*6,1.2+2*(1-ph)*ki)}}
   // outer water: a circle closing in from beyond the hull toward the cockpit rim (only on the kayak)
   const ko=clamp((vl-.03)/.97,0,1);
-  if(ko>0){const sc=2.6-1.6*ko,rx=(CK.rx+6)*sc,ry=(CK.ry+6)*sc;
+  if(ko>0){const sc=2.6-1.6*ko,rx=(CK.rx+6)*sc,ry=(CK.ry+6)*sc,
+      // the waterline is offset toward the bow, so the bow goes under first
+      cy=CK.y+12*(1-ko),wav=(p)=>{for(let i=0;i<=56;i++){const a=i/56*Math.PI*2,w=1+Math.sin(a*7+t*3.2)*.025+Math.sin(a*3-t*2.1)*.02;
+        const x=CK.x+Math.cos(a)*rx*w,y=cy+Math.sin(a)*ry*w;i?p.lineTo(x,y):p.moveTo(x,y)}p.closePath()};
     ctx.save();hullPath();ctx.clip();
-    hullPath();ctx.ellipse(CK.x,CK.y,rx,ry,0,0,Math.PI*2);
-    ctx.fillStyle='rgba(62,142,166,.86)';ctx.fill('evenodd');
-    if(vl<.985){ctx.strokeStyle='rgba(205,242,250,.9)';ctx.lineWidth=2.5;ctx.beginPath();ctx.ellipse(CK.x,CK.y,rx,ry,0,0,Math.PI*2);ctx.stroke()}
-    else{ctx.fillStyle='rgba(62,142,166,.86)';ell(CK.x,CK.y,CK.rx+7,CK.ry+7)}
+    hullPath();wav(ctx);ctx.fillStyle='rgba(30,92,84,.9)';ctx.fill('evenodd');
+    // a soft lighter band just outside the waterline, then the foam line itself
+    if(vl<.985){ctx.beginPath();wav(ctx);ctx.strokeStyle='rgba(120,200,190,.35)';ctx.lineWidth=9;ctx.stroke();
+      ctx.beginPath();wav(ctx);ctx.strokeStyle='rgba(225,250,245,.95)';ctx.lineWidth=2.6;ctx.stroke()}
+    else{ctx.fillStyle='rgba(30,92,84,.9)';ell(CK.x,CK.y,CK.rx+7,CK.ry+7)}
     ctx.restore()}
   if(sinking){const k=clamp((level-FULL_LEVEL)/(100-FULL_LEVEL),0,1);
-    if(Math.sin(t*(7+k*22))>-.1){ctx.fillStyle='rgba(235,40,30,'+(.5+.3*k)+')';hullPath();ctx.fill()}}
+    // a lighter red wash plus a hot red rim, so the creeping waterline still shows through the blink
+    if(Math.sin(t*(7+k*22))>-.1){ctx.fillStyle='rgba(235,40,30,'+(.2+.18*k)+')';hullPath();ctx.fill();
+      ctx.strokeStyle='rgba(255,70,50,'+(.75+.25*k)+')';ctx.lineWidth=4;ctx.lineJoin='round';hullPath();ctx.stroke()}}
   ctx.restore();
   return bob;
 }
@@ -986,6 +1010,7 @@ function draw(){
   if(tut===3&&tutDip>0){ctx.translate(0,80*tutDip*tutDip);ctx.globalAlpha=1-.5*tutDip}
   if(state==='win'){const e=clamp((t-endT0)/1.6,0,1);ctx.translate(0,-36*e*(2-e))}
   if(pan>0&&state==='play'){const a=Math.sin(t*38)*.035*pan;ctx.translate(Math.sin(t*47)*3*pan,0);ctx.translate(...K(180,600));ctx.rotate(a);ctx.translate(-180,-K(180,600)[1])}
+  if(vl>0){const ss=1-.07*vl;ctx.translate(...K(180,600));ctx.scale(ss,ss);ctx.translate(-180,-K(180,600)[1])}   // going under = a little further from the camera
   const bob=drawKayak(off);
   drawQueue(bob,off);
   drawSunk(bob);
